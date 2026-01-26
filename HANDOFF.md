@@ -1,0 +1,381 @@
+# Handoff Document
+
+This document provides everything needed to continue development on Bijaz.
+
+## Latest Session (2026-01-26, Session 5)
+
+### What Was Done
+1. **Intel alerts (conversational setup)**
+   - Bot asks users if they want to configure alerts
+   - Prompts for watchlist-only, keywords, and sources
+   - Writes alert settings into config automatically
+
+2. **Alert ranking + scoring**
+   - Weighted scoring (keywords/entities/sentiment)
+   - Entity + sentiment-aware filters
+   - CLI preview (`bijaz intel alerts`)
+
+3. **Intel retention + pruning**
+   - Automatic pruning of old intel items
+   - Manual `bijaz memory prune` for chat cleanup
+
+4. **Docs + config aligned**
+   - Updated README + INTEL_SOURCES
+   - Default config cleaned up + new alert fields
+
+### What's Ready to Use
+- Conversational chat (just type naturally)
+- Persistent memory with auto-compaction
+- Semantic memory recall
+- `/top10` - daily opportunities
+- `/fullauto on` - enable autonomous trading
+- `/status` - see P&L and status
+- Daily reports pushed to channels
+- NewsAPI/Google News/Twitter/Polymarket comments intel
+- Conversational intel alert setup + preview
+- Paper trading works, real trading needs Polymarket adapter
+
+### Immediate Next Steps
+1. Build Polymarket execution adapter (CLOB API) for real trading
+2. Portfolio/position tracking + balance reporting
+3. Fork Clawdbot for proactive search capabilities
+
+---
+
+## Quick Links
+
+| Document | Purpose |
+|----------|---------|
+| [README.md](README.md) | Project overview and quick start |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Technical architecture and data flows |
+| [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md) | Phased implementation roadmap |
+| [docs/WALLET_SECURITY.md](docs/WALLET_SECURITY.md) | Critical wallet security design |
+| [docs/INTEL_SOURCES.md](docs/INTEL_SOURCES.md) | Intelligence source configuration |
+| [docs/CALIBRATION.md](docs/CALIBRATION.md) | Prediction calibration system |
+
+## What Is Bijaz?
+
+Bijaz is a **prediction market AI companion** - an AI assistant that helps you make better predictions on Polymarket. Unlike pure trading bots that optimize for speed/arbitrage, Bijaz:
+
+1. **Learns your interests** and curates relevant intel
+2. **Tracks calibration** - how accurate your predictions actually are
+3. **Discusses reasoning** before executing trades
+4. **Builds institutional memory** of what worked and why
+
+## Key Design Decisions
+
+### 1. Built on Clawdbot
+
+Clawdbot provides battle-tested infrastructure for:
+- Multi-channel messaging (WhatsApp, Telegram, Discord, Slack)
+- Session management
+- Gateway architecture
+- Skills system
+
+We fork Clawdbot rather than building from scratch.
+
+### 2. Security-First Wallet
+
+The wallet is the most critical component. Design principles:
+- **Address whitelist is hardcoded** - only Polymarket contracts allowed
+- **Spending limits enforced at app layer** - daily and per-trade limits
+- **Key encrypted at rest** - AES-256-GCM with Argon2 key derivation
+- **Hot wallet only** - never store more than you can afford to lose
+
+### 3. Calibration as Core Feature
+
+The calibration system is what makes Bijaz valuable over time:
+- Every prediction is recorded with reasoning
+- Outcomes are tracked when markets resolve
+- Brier scores calculated per domain
+- Confidence adjustments applied to future predictions
+
+### 4. Modular Intel Sources
+
+Intel sources are pluggable:
+- Start with RSS (free)
+- Add NewsAPI, Twitter as needed
+- Custom webhooks for specialized sources
+- All feed into unified vector store
+
+## Where to Start
+
+### If You're a Solo Developer
+
+1. **Week 1-2:** Fork Clawdbot, set up wallet security layer
+2. **Week 3-4:** Integrate Polymarket API (read + execute)
+3. **Week 5-6:** Build prediction recording + calibration
+4. **Week 7-8:** Add RSS intel source + basic retrieval
+5. **Week 9-10:** LLM integration for market analysis
+6. **Week 11-12:** Telegram channel + daily briefings
+
+### If You're a Team
+
+Run phases in parallel:
+- **Backend lead:** Wallet, Polymarket, execution
+- **ML engineer:** Intel pipeline, embeddings, prompts
+- **Full-stack:** Channels, CLI, formatting
+
+## Critical Path Items
+
+These must be done first and done right:
+
+### 1. Wallet Whitelist (Day 1)
+
+```typescript
+// src/execution/wallet/whitelist.ts
+// HARDCODE these addresses - do not make configurable
+
+export const POLYMARKET_WHITELIST = Object.freeze([
+  '0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E', // CTF Exchange
+  '0xC5d563A36AE78145C45a50134d48A1215220f80a', // Neg Risk Exchange
+  '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296', // Neg Risk Adapter
+  '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174', // USDC
+]);
+
+export function isWhitelisted(address: string): boolean {
+  return POLYMARKET_WHITELIST.includes(address.toLowerCase());
+}
+```
+
+### 2. Spending Limits (Day 2)
+
+Must be enforced before ANY transaction signing.
+
+### 3. Test Coverage (Ongoing)
+
+Security-critical code needs 100% test coverage:
+- Whitelist enforcement
+- Spending limit enforcement
+- Key never logged/exposed
+
+## Dependencies
+
+### From Clawdbot
+- Gateway WebSocket server
+- Channel adapters (Telegram, WhatsApp, Discord, Slack)
+- Session management
+- Cron scheduler
+- CLI framework
+
+### New Dependencies
+```json
+{
+  "@polymarket/sdk": "latest",
+  "@polymarket/order-utils": "latest",
+  "ethers": "^5.7.0",
+  "chromadb": "^1.5.0",
+  "@xenova/transformers": "^2.15.0",
+  "better-sqlite3": "^9.4.0"
+}
+```
+
+## Configuration
+
+### Minimal Config (Development)
+
+```yaml
+# config/bijaz.yaml
+gateway:
+  port: 18789
+
+agent:
+  model: claude-sonnet-4-5-20251101
+  workspace: ~/bijaz
+
+wallet:
+  limits:
+    daily: 50
+    perTrade: 10
+    confirmationThreshold: 5
+
+intel:
+  sources:
+    rss:
+      enabled: true
+      feeds:
+        - url: https://fivethirtyeight.com/feed/
+          category: politics
+
+polymarket:
+  network: polygon
+  # Use testnet for development
+```
+
+### Production Config
+
+See `config/production.yaml.example` for full configuration.
+
+## API Keys Needed
+
+| Service | Required | Cost | Purpose |
+|---------|----------|------|---------|
+| Anthropic | Yes | ~$20/mo | LLM reasoning |
+| Polygon RPC | Yes | Free tier | Blockchain access |
+| NewsAPI | No | Free-$449/mo | News aggregation |
+| Twitter | No | $100/mo | Social sentiment |
+| SerpAPI | No | $50/mo | Google News |
+| Gemini API | No | Free tier | Embeddings (Google) |
+
+## File Structure
+
+```
+Bijaz/
+├── README.md                 # Project overview
+├── HANDOFF.md               # This document
+├── package.json             # Dependencies
+├── tsconfig.json            # TypeScript config
+├── config/
+│   ├── default.yaml         # Default config
+│   └── production.yaml.example
+├── docs/
+│   ├── ARCHITECTURE.md      # System design
+│   ├── IMPLEMENTATION_PLAN.md # Build roadmap
+│   ├── WALLET_SECURITY.md   # Security design
+│   ├── INTEL_SOURCES.md     # Intel configuration
+│   └── CALIBRATION.md       # Calibration system
+├── src/
+│   ├── core/                # Agent logic
+│   ├── intel/               # Intel aggregation
+│   ├── memory/              # Persistence
+│   ├── execution/           # Trading
+│   └── interface/           # User interface
+├── scripts/
+│   ├── setup.sh             # Initial setup
+│   └── migrate.sh           # DB migrations
+└── tests/
+    ├── unit/
+    ├── integration/
+    └── e2e/
+```
+
+## Commands to Implement
+
+### Phase 1 (Foundation)
+```bash
+bijaz wallet create          # Create new wallet
+bijaz wallet import          # Import existing wallet
+bijaz wallet status          # Show balance and address
+bijaz wallet limits set      # Configure spending limits
+bijaz wallet limits show     # Show current limits
+```
+
+### Phase 2 (Markets)
+```bash
+bijaz markets list           # List active markets
+bijaz markets show <id>      # Show market details
+bijaz markets watch <id>     # Add to watchlist
+bijaz trade buy <market> <outcome> <price> --amount <usd>
+bijaz trade sell <market> <outcome> <price> --amount <usd>
+bijaz portfolio              # Show positions and P&L
+```
+
+### Phase 3 (Predictions)
+```bash
+bijaz predict <market>       # Analyze and record prediction
+bijaz predictions list       # List recent predictions
+bijaz predictions show <id>  # Show prediction details
+bijaz calibration show       # Show calibration stats
+bijaz calibration history    # Show prediction outcomes
+```
+
+### Phase 4 (Intel)
+```bash
+bijaz intel status           # Show source status
+bijaz intel add <source>     # Add intel source
+bijaz intel search <query>   # Search intel
+bijaz intel recent           # Show recent intel
+```
+
+### Phase 5 (Agent)
+```bash
+bijaz chat                   # Interactive chat
+bijaz briefing               # Generate daily briefing
+bijaz analyze <market>       # Deep market analysis
+```
+
+## Testing Strategy
+
+### Unit Tests (Mandatory)
+- `whitelist.test.ts` - Address whitelist enforcement
+- `limits.test.ts` - Spending limit enforcement
+- `keystore.test.ts` - Key encryption/decryption
+- `calibration.test.ts` - Brier score calculation
+
+### Integration Tests
+- `polymarket.test.ts` - API integration
+- `intel-pipeline.test.ts` - Source → vector store
+
+### E2E Tests
+- `trade-flow.test.ts` - Full trade execution
+- `prediction-flow.test.ts` - Predict → resolve → calibrate
+
+## Known Challenges
+
+### 1. Polymarket Geographic Restrictions
+Polymarket is restricted in the US. Users need:
+- VPN or non-US location
+- Non-US identity for larger trades
+
+### 2. API Rate Limits
+- Polymarket: Moderate limits, use WebSocket for live data
+- NewsAPI: 100 req/day free tier
+- Twitter: 500K tweets/month free tier
+
+### 3. LLM Costs
+Claude Opus is expensive for heavy use. Strategies:
+- Use Haiku for simple tasks
+- Cache frequent queries
+- Batch market analysis
+
+### 4. Market Resolution Timing
+Markets can take hours/days to resolve. Need:
+- Cron job to check resolutions
+- Handle partial resolutions
+- Deal with voided markets
+
+## Questions for Product Decisions
+
+These need answers before building:
+
+1. **Autonomy levels** - How autonomous should Bijaz be by default?
+   - Manual (requires confirmation for all trades)
+   - Semi-auto (auto-execute small trades, confirm large)
+   - Full auto (dangerous, not recommended)
+
+2. **Default position sizing** - What fraction of Kelly criterion?
+   - Conservative: 1/4 Kelly (recommended)
+   - Moderate: 1/2 Kelly
+   - Aggressive: Full Kelly (risky)
+
+3. **Briefing frequency** - Daily? Twice daily? On-demand only?
+
+4. **Alert thresholds** - When to alert about high-relevance intel?
+
+## Resources
+
+### Polymarket
+- [Polymarket Docs](https://docs.polymarket.com)
+- [Polymarket Agents Repo](https://github.com/Polymarket/agents)
+- [CLOB API](https://docs.polymarket.com/clob)
+
+### Clawdbot
+- [Clawdbot Repo](https://github.com/clawdbot/clawdbot)
+- [Clawdbot Docs](https://docs.clawd.bot)
+
+### Calibration
+- [Brier Score](https://en.wikipedia.org/wiki/Brier_score)
+- [Calibration Curves](https://scikit-learn.org/stable/modules/calibration.html)
+- [Superforecasting](https://www.amazon.com/Superforecasting-Science-Prediction-Philip-Tetlock/dp/0804136718) (book)
+
+## Contact
+
+If you have questions about this design, the key architectural decisions are documented in:
+- `docs/ARCHITECTURE.md` - System design rationale
+- `docs/WALLET_SECURITY.md` - Security design rationale
+
+---
+
+**Good luck building Bijaz!**
+
+The hardest part is getting the wallet security right. After that, it's mostly plumbing and polish.

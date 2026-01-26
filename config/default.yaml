@@ -1,0 +1,201 @@
+# Bijaz Default Configuration
+# Copy to ~/.bijaz/config.yaml and customize
+
+# Gateway settings (inherited from Clawdbot)
+gateway:
+  port: 18789
+  bind: loopback
+  auth:
+    mode: password  # Required for remote access
+
+# Agent settings
+agent:
+  # Primary LLM model
+  model: claude-sonnet-4-5-20251101
+  # Fallback model (faster, cheaper)
+  fallbackModel: claude-3-5-haiku-20241022
+  # Model provider: anthropic | openai | local
+  provider: anthropic
+  # OpenAI-compatible base URL (used for openai/local providers)
+  apiBaseUrl: https://api.openai.com
+  # Workspace directory
+  workspace: ~/.bijaz
+  # Maximum thinking level
+  thinkingLevel: high
+
+# Wallet configuration
+wallet:
+  # Encrypted keystore location
+  keystorePath: ~/.bijaz/keystore.json
+
+  # Spending limits (USD)
+  limits:
+    daily: 100          # Max spend per day
+    perTrade: 25        # Max per single trade
+    confirmationThreshold: 10  # Require confirmation above this
+
+  # Risk controls
+  exposure:
+    maxPositionPercent: 20   # Max % of portfolio in one market
+    maxDomainPercent: 40     # Max % in one domain
+
+  # Loss protection
+  cooldown:
+    lossThresholdPercent: 10  # Trigger at 10% daily loss
+    durationSeconds: 3600     # 1 hour cooldown
+
+# Polymarket settings
+polymarket:
+  network: polygon
+  rpcUrl: https://polygon-rpc.com
+  # API endpoints
+  api:
+    gamma: https://gamma-api.polymarket.com
+    clob: https://clob.polymarket.com
+
+# Execution mode
+execution:
+  # paper = simulated trades, webhook = forward orders to external executor
+  mode: paper
+  webhookUrl: ""
+
+# Channel integrations
+channels:
+  telegram:
+    enabled: false
+    token: ""          # TELEGRAM_BOT_TOKEN
+    allowedChatIds: [] # Restrict to these chat IDs (optional)
+    pollingInterval: 5 # seconds
+  whatsapp:
+    enabled: false
+    verifyToken: ""     # WHATSAPP_VERIFY_TOKEN
+    accessToken: ""     # WHATSAPP_ACCESS_TOKEN
+    phoneNumberId: ""   # WHATSAPP_PHONE_NUMBER_ID
+    allowedNumbers: []  # E.164 numbers allowed to chat (optional)
+
+# Autonomous scan loop
+autonomy:
+  enabled: true
+  scanIntervalSeconds: 900
+  maxMarketsPerScan: 10
+  watchlistOnly: true
+  eventDriven: false
+  eventDrivenMinItems: 1
+
+  # Full autonomous mode (auto-executes trades)
+  fullAuto: false              # Master toggle for auto-execution
+  minEdge: 0.05                # Minimum edge to trade (5%)
+  requireHighConfidence: false # Only trade high-confidence opportunities
+  pauseOnLossStreak: 3         # Pause after N consecutive losses
+  dailyReportTime: "20:00"     # Time to send daily P&L report
+  maxTradesPerScan: 3          # Max trades per scan cycle
+
+# Memory persistence
+memory:
+  dbPath: ~/.bijaz/bijaz.sqlite
+  sessionsPath: ~/.bijaz/sessions
+  maxHistoryMessages: 50
+  compactAfterTokens: 12000
+  keepRecentMessages: 12
+  retentionDays: 90
+  embeddings:
+    enabled: false
+    provider: openai     # openai | google
+    model: text-embedding-3-small
+    apiBaseUrl: https://api.openai.com
+
+# Notifications / schedulers
+notifications:
+  briefing:
+    enabled: false
+    time: "08:00"
+    channels: []
+  dailyReport:
+    enabled: false
+    channels: []
+  resolver:
+    enabled: false
+    time: "02:00"
+    limit: 50
+  intelFetch:
+    enabled: false
+    time: "06:00"
+  intelAlerts:
+    enabled: false
+    channels: []
+    watchlistOnly: true
+    maxItems: 10
+    includeSources: []
+    excludeSources: []
+    includeKeywords: []
+    excludeKeywords: []
+    minKeywordOverlap: 1
+    minTitleLength: 8
+    minSentiment:
+    maxSentiment:
+    includeEntities: []
+    excludeEntities: []
+    minEntityOverlap: 1
+    useContent: true
+    minScore: 0
+    keywordWeight: 1
+    entityWeight: 1
+    sentimentWeight: 1
+    showScore: false
+
+# Intel sources
+intel:
+  embeddings:
+    enabled: false
+    provider: openai     # openai | google
+    model: text-embedding-3-small
+    apiBaseUrl: https://api.openai.com
+  retentionDays: 30
+
+  # Sources (configure API keys in environment)
+  sources:
+    # RSS feeds (free)
+    rss:
+      enabled: true
+      feeds:
+        - url: https://fivethirtyeight.com/feed/
+          category: politics
+        - url: https://www.federalreserve.gov/feeds/press_all.xml
+          category: economics
+        - url: https://techcrunch.com/feed/
+          category: technology
+
+    # Polymarket comments (free)
+    polymarketComments:
+      enabled: true
+      trackWatchlist: true
+      watchlistLimit: 50
+      trackTopMarkets: 20
+      maxCommentsPerMarket: 20
+
+    # NewsAPI
+    newsapi:
+      enabled: false
+      apiKey: ${NEWSAPI_KEY}
+      categories: []
+      countries: []
+      queries: []
+      maxArticlesPerFetch: 50
+      language: en
+
+    # Google News via SerpAPI
+    googlenews:
+      enabled: false
+      serpApiKey: ${SERPAPI_KEY}
+      queries: []
+      country: us
+      language: en
+      maxArticlesPerFetch: 20
+
+    # Twitter/X
+    twitter:
+      enabled: false
+      bearerToken: ${TWITTER_BEARER}
+      keywords: []
+      accounts: []
+      maxTweetsPerFetch: 25

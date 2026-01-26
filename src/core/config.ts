@@ -1,0 +1,274 @@
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+import { z } from 'zod';
+import yaml from 'yaml';
+
+const expandHome = (value: string): string => {
+  if (value.startsWith('~/')) {
+    return join(homedir(), value.slice(2));
+  }
+  return value;
+};
+
+const ConfigSchema = z.object({
+  gateway: z
+    .object({
+      port: z.number().default(18789),
+      bind: z.string().default('loopback'),
+    })
+    .default({}),
+  agent: z.object({
+    model: z.string(),
+    fallbackModel: z.string().optional(),
+    provider: z.enum(['anthropic', 'openai', 'local']).default('anthropic'),
+    apiBaseUrl: z.string().optional(),
+    workspace: z.string().optional(),
+  }),
+  execution: z
+    .object({
+      mode: z.enum(['paper', 'webhook']).default('paper'),
+      webhookUrl: z.string().optional(),
+    })
+    .default({}),
+  wallet: z
+    .object({
+      keystorePath: z.string().optional(),
+      limits: z
+        .object({
+          daily: z.number().default(100),
+          perTrade: z.number().default(25),
+          confirmationThreshold: z.number().default(10),
+        })
+        .default({}),
+    })
+    .default({}),
+  polymarket: z.object({
+    api: z.object({
+      gamma: z.string(),
+      clob: z.string(),
+    }),
+    rpcUrl: z.string().optional(),
+  }),
+  intel: z
+    .object({
+      embeddings: z
+        .object({
+          enabled: z.boolean().default(false),
+          provider: z.enum(['openai', 'google']).default('openai'),
+          model: z.string().default('text-embedding-3-small'),
+          apiBaseUrl: z.string().optional(),
+        })
+        .default({ enabled: false }),
+      sources: z
+        .object({
+          rss: z
+            .object({
+              enabled: z.boolean().default(false),
+              feeds: z.array(
+                z.object({
+                  url: z.string(),
+                  category: z.string().optional(),
+                })
+              ),
+            })
+            .default({ enabled: false, feeds: [] }),
+          newsapi: z
+            .object({
+              enabled: z.boolean().default(false),
+              apiKey: z.string().optional(),
+              baseUrl: z.string().optional(),
+              categories: z.array(z.string()).default([]),
+              countries: z.array(z.string()).default([]),
+              queries: z.array(z.string()).default([]),
+              maxArticlesPerFetch: z.number().default(50),
+              language: z.string().default('en'),
+            })
+            .default({ enabled: false }),
+          googlenews: z
+            .object({
+              enabled: z.boolean().default(false),
+              serpApiKey: z.string().optional(),
+              baseUrl: z.string().optional(),
+              queries: z.array(z.string()).default([]),
+              country: z.string().default('us'),
+              language: z.string().default('en'),
+              maxArticlesPerFetch: z.number().default(20),
+            })
+            .default({ enabled: false }),
+          twitter: z
+            .object({
+              enabled: z.boolean().default(false),
+              bearerToken: z.string().optional(),
+              baseUrl: z.string().optional(),
+              keywords: z.array(z.string()).default([]),
+              accounts: z.array(z.string()).default([]),
+              maxTweetsPerFetch: z.number().default(25),
+            })
+            .default({ enabled: false }),
+          polymarketComments: z
+            .object({
+              enabled: z.boolean().default(false),
+              trackWatchlist: z.boolean().default(true),
+              watchlistLimit: z.number().default(50),
+              trackTopMarkets: z.number().default(0),
+              maxCommentsPerMarket: z.number().default(20),
+              holdersOnly: z.boolean().default(false),
+              getPositions: z.boolean().default(false),
+              order: z.string().optional(),
+              ascending: z.boolean().optional(),
+            })
+            .default({ enabled: false }),
+        })
+        .default({}),
+      retentionDays: z.number().default(30),
+    })
+    .default({}),
+  memory: z.object({
+    dbPath: z.string().optional(),
+    sessionsPath: z.string().optional(),
+    maxHistoryMessages: z.number().default(50),
+    compactAfterTokens: z.number().default(12000),
+    keepRecentMessages: z.number().default(12),
+    retentionDays: z.number().default(90),
+    embeddings: z
+      .object({
+        enabled: z.boolean().default(false),
+        provider: z.enum(['openai', 'google']).default('openai'),
+        model: z.string().default('text-embedding-3-small'),
+        apiBaseUrl: z.string().optional(),
+      })
+      .default({ enabled: false }),
+  }),
+  channels: z
+    .object({
+      telegram: z
+        .object({
+          enabled: z.boolean().default(false),
+          token: z.string().optional(),
+          allowedChatIds: z.array(z.union([z.string(), z.number()])).default([]),
+          pollingInterval: z.number().default(5),
+        })
+        .default({}),
+      whatsapp: z
+        .object({
+          enabled: z.boolean().default(false),
+          verifyToken: z.string().optional(),
+          accessToken: z.string().optional(),
+          phoneNumberId: z.string().optional(),
+          allowedNumbers: z.array(z.string()).default([]),
+        })
+        .default({}),
+    })
+    .default({}),
+  autonomy: z
+    .object({
+      enabled: z.boolean().default(true),
+      scanIntervalSeconds: z.number().default(900),
+      maxMarketsPerScan: z.number().default(10),
+      watchlistOnly: z.boolean().default(true),
+      eventDriven: z.boolean().default(false),
+      eventDrivenMinItems: z.number().default(1),
+      // Full autonomous mode options
+      fullAuto: z.boolean().default(false),
+      minEdge: z.number().default(0.05),
+      requireHighConfidence: z.boolean().default(false),
+      pauseOnLossStreak: z.number().default(3),
+      dailyReportTime: z.string().default('20:00'),
+      maxTradesPerScan: z.number().default(3),
+    })
+    .default({}),
+  notifications: z
+    .object({
+      briefing: z
+        .object({
+          enabled: z.boolean().default(false),
+          time: z.string().default('08:00'),
+          channels: z.array(z.string()).default([]),
+        })
+        .default({}),
+      dailyReport: z
+        .object({
+          enabled: z.boolean().default(false),
+          channels: z.array(z.string()).default([]),
+        })
+        .default({}),
+      resolver: z
+        .object({
+          enabled: z.boolean().default(false),
+          time: z.string().default('02:00'),
+          limit: z.number().default(50),
+        })
+        .default({}),
+      intelFetch: z
+        .object({
+          enabled: z.boolean().default(false),
+          time: z.string().default('06:00'),
+        })
+        .default({}),
+      intelAlerts: z
+        .object({
+          enabled: z.boolean().default(false),
+          channels: z.array(z.string()).default([]),
+          watchlistOnly: z.boolean().default(true),
+          maxItems: z.number().default(10),
+          includeSources: z.array(z.string()).default([]),
+          excludeSources: z.array(z.string()).default([]),
+          includeKeywords: z.array(z.string()).default([]),
+          excludeKeywords: z.array(z.string()).default([]),
+          minKeywordOverlap: z.number().default(1),
+          minTitleLength: z.number().default(8),
+          minSentiment: z.number().optional(),
+          maxSentiment: z.number().optional(),
+          includeEntities: z.array(z.string()).default([]),
+          excludeEntities: z.array(z.string()).default([]),
+          minEntityOverlap: z.number().default(1),
+          useContent: z.boolean().default(true),
+          minScore: z.number().default(0),
+          keywordWeight: z.number().default(1),
+          entityWeight: z.number().default(1),
+          sentimentWeight: z.number().default(1),
+          showScore: z.boolean().default(false),
+        })
+        .default({}),
+    })
+    .default({}),
+});
+
+export type BijazConfig = z.infer<typeof ConfigSchema>;
+
+export function loadConfig(configPath?: string): BijazConfig {
+  const path =
+    configPath ??
+    process.env.BIJAZ_CONFIG_PATH ??
+    join(homedir(), '.bijaz', 'config.yaml');
+
+  const raw = readFileSync(path, 'utf-8');
+  const parsed = yaml.parse(raw) ?? {};
+
+  const cfg = ConfigSchema.parse(parsed);
+
+  const envPort = process.env.BIJAZ_GATEWAY_PORT;
+  if (envPort) {
+    const port = Number(envPort);
+    if (!Number.isNaN(port)) {
+      cfg.gateway.port = port;
+    }
+  }
+
+  if (cfg.agent.workspace) {
+    cfg.agent.workspace = expandHome(cfg.agent.workspace);
+  }
+  if (cfg.memory.dbPath) {
+    cfg.memory.dbPath = expandHome(cfg.memory.dbPath);
+  }
+  if (cfg.wallet?.keystorePath) {
+    cfg.wallet.keystorePath = expandHome(cfg.wallet.keystorePath);
+  }
+  if (cfg.memory?.sessionsPath) {
+    cfg.memory.sessionsPath = expandHome(cfg.memory.sessionsPath);
+  }
+
+  return cfg;
+}

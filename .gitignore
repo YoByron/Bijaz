@@ -1,0 +1,53 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+*.js
+*.d.ts
+*.js.map
+!src/**/*.js
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+keystore.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Testing
+coverage/
+.nyc_output/
+
+# Data directories (contain user data)
+data/
+chroma/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Package manager locks (keep one)
+# package-lock.json
+# yarn.lock
+# Keep pnpm-lock.yaml

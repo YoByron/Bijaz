@@ -1,0 +1,170 @@
+import { randomUUID } from 'node:crypto';
+
+import type { BijazConfig } from '../core/config.js';
+import { RssFetcher } from './rss.js';
+import { NewsApiFetcher } from './newsapi.js';
+import { GoogleNewsFetcher } from './googlenews.js';
+import { TwitterFetcher } from './twitter.js';
+import { PolymarketCommentsFetcher } from './polymarket_comments.js';
+import { storeIntel, type StoredIntel } from './store.js';
+import { IntelVectorStore } from './vectorstore.js';
+
+export interface IntelPipelineResult {
+  storedCount: number;
+  storedItems: StoredIntel[];
+}
+
+export async function runIntelPipeline(config: BijazConfig): Promise<number> {
+  const result = await runIntelPipelineDetailed(config);
+  return result.storedCount;
+}
+
+export async function runIntelPipelineDetailed(
+  config: BijazConfig
+): Promise<IntelPipelineResult> {
+  let stored = 0;
+  const storedItems: StoredIntel[] = [];
+  const vectorStore = new IntelVectorStore(config);
+  const rssEnabled = config.intel?.sources?.rss?.enabled ?? false;
+  const newsApiEnabled = config.intel?.sources?.newsapi?.enabled ?? false;
+  const googleNewsEnabled = config.intel?.sources?.googlenews?.enabled ?? false;
+  const twitterEnabled = config.intel?.sources?.twitter?.enabled ?? false;
+  const commentsEnabled = config.intel?.sources?.polymarketComments?.enabled ?? false;
+
+  if (rssEnabled) {
+    const fetcher = new RssFetcher(config);
+    const items = await fetcher.fetch();
+    for (const item of items) {
+      const id = randomUUID();
+      const record: StoredIntel = {
+        id,
+        title: item.title,
+        content: item.content,
+        source: item.source,
+        sourceType: 'news',
+        category: item.category,
+        url: item.url,
+        timestamp: item.publishedAt,
+      };
+      const inserted = storeIntel(record);
+      if (inserted) {
+        await vectorStore.add({
+          id,
+          text: `${item.title}\n${item.content ?? ''}`.trim(),
+        });
+        storedItems.push(record);
+        stored += 1;
+      }
+    }
+  }
+
+  if (newsApiEnabled) {
+    const fetcher = new NewsApiFetcher(config);
+    const items = await fetcher.fetch();
+    for (const item of items) {
+      const id = randomUUID();
+      const record: StoredIntel = {
+        id,
+        title: item.title,
+        content: item.content,
+        source: item.source,
+        sourceType: 'news',
+        category: item.category,
+        url: item.url,
+        timestamp: item.publishedAt,
+      };
+      const inserted = storeIntel(record);
+      if (inserted) {
+        await vectorStore.add({
+          id,
+          text: `${item.title}\n${item.content ?? ''}`.trim(),
+        });
+        storedItems.push(record);
+        stored += 1;
+      }
+    }
+  }
+
+  if (googleNewsEnabled) {
+    const fetcher = new GoogleNewsFetcher(config);
+    const items = await fetcher.fetch();
+    for (const item of items) {
+      const id = randomUUID();
+      const record: StoredIntel = {
+        id,
+        title: item.title,
+        content: item.content,
+        source: item.source,
+        sourceType: 'news',
+        category: item.category,
+        url: item.url,
+        timestamp: item.publishedAt,
+      };
+      const inserted = storeIntel(record);
+      if (inserted) {
+        await vectorStore.add({
+          id,
+          text: `${item.title}\n${item.content ?? ''}`.trim(),
+        });
+        storedItems.push(record);
+        stored += 1;
+      }
+    }
+  }
+
+  if (twitterEnabled) {
+    const fetcher = new TwitterFetcher(config);
+    const items = await fetcher.fetch();
+    for (const item of items) {
+      const id = randomUUID();
+      const record: StoredIntel = {
+        id,
+        title: item.title,
+        content: item.content,
+        source: item.source,
+        sourceType: 'social',
+        category: item.category,
+        url: item.url,
+        timestamp: item.publishedAt,
+      };
+      const inserted = storeIntel(record);
+      if (inserted) {
+        await vectorStore.add({
+          id,
+          text: `${item.title}\n${item.content ?? ''}`.trim(),
+        });
+        storedItems.push(record);
+        stored += 1;
+      }
+    }
+  }
+
+  if (commentsEnabled) {
+    const fetcher = new PolymarketCommentsFetcher(config);
+    const items = await fetcher.fetch();
+    for (const item of items) {
+      const id = randomUUID();
+      const record: StoredIntel = {
+        id,
+        title: item.title,
+        content: item.content,
+        source: item.source,
+        sourceType: 'social',
+        category: item.category,
+        url: item.url,
+        timestamp: item.publishedAt,
+      };
+      const inserted = storeIntel(record);
+      if (inserted) {
+        await vectorStore.add({
+          id,
+          text: `${item.title}\n${item.content ?? ''}`.trim(),
+        });
+        storedItems.push(record);
+        stored += 1;
+      }
+    }
+  }
+
+  return { storedCount: stored, storedItems };
+}

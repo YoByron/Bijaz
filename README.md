@@ -168,7 +168,7 @@ Copy `config/default.yaml` to `~/.bijaz/config.yaml` and edit.
 ```yaml
 agent:
   provider: anthropic    # anthropic | openai | local
-  model: claude-opus-4-5-20251101
+  model: claude-sonnet-4-5-20251101
   fallbackModel: claude-3-5-haiku-20241022
   apiBaseUrl: https://api.openai.com  # for openai/local
 ```
@@ -190,6 +190,32 @@ wallet:
     confirmationThreshold: 10
 ```
 
+#### Memory & Embeddings
+```yaml
+memory:
+  sessionsPath: ~/.bijaz/sessions
+  maxHistoryMessages: 50
+  compactAfterTokens: 12000
+  keepRecentMessages: 12
+  retentionDays: 90
+  embeddings:
+    enabled: true
+    provider: openai     # openai | google
+    model: text-embedding-3-small
+    apiBaseUrl: https://api.openai.com
+```
+
+#### Intel & Semantic Search
+```yaml
+intel:
+  embeddings:
+    enabled: true
+    provider: openai     # openai | google
+    model: text-embedding-3-small
+    apiBaseUrl: https://api.openai.com
+  retentionDays: 30
+```
+
 #### Autonomy
 ```yaml
 autonomy:
@@ -197,6 +223,8 @@ autonomy:
   scanIntervalSeconds: 900
   maxMarketsPerScan: 10
   watchlistOnly: true
+  eventDriven: false
+  eventDrivenMinItems: 1
 ```
 
 #### Daily Briefing Scheduler
@@ -208,6 +236,40 @@ notifications:
     channels:
       - telegram
       - whatsapp
+  dailyReport:
+    enabled: true
+    channels:
+      - telegram
+  resolver:
+    enabled: true
+    time: "02:00"
+    limit: 50
+  intelFetch:
+    enabled: true
+    time: "06:00"
+  intelAlerts:
+    enabled: true
+    channels:
+      - telegram
+    watchlistOnly: true
+    maxItems: 10
+    includeSources: []
+    excludeSources: []
+    includeKeywords: []
+    excludeKeywords: []
+    minKeywordOverlap: 1
+    minTitleLength: 8
+    minSentiment:
+    maxSentiment:
+    includeEntities: []
+    excludeEntities: []
+    minEntityOverlap: 1
+    useContent: true
+    minScore: 0
+    keywordWeight: 1
+    entityWeight: 1
+    sentimentWeight: 1
+    showScore: false
 ```
 
 #### Channels
@@ -275,14 +337,31 @@ bijaz user show <id>
 bijaz user set <id> --domains politics,crypto --risk moderate --pref timezone=EST
 ```
 
+### Intel (CLI)
+```bash
+bijaz intel status
+bijaz intel recent --limit 20
+bijaz intel alerts --limit 50
+```
+
+### Memory (CLI)
+```bash
+bijaz memory sessions
+bijaz memory show <userId> -l 50
+bijaz memory compact <userId>
+bijaz memory prune --days 90
+```
+
 ### Telegram/WhatsApp Commands
 
 **Conversation (NEW):**
 - Just type naturally to chat about events, markets, or predictions
+- Persistent memory with auto-compaction and semantic recall
 - `/ask <topic>` - Ask about a topic and find relevant markets
 - `/analyze <marketId>` - Deep LLM analysis of a specific market
 - `/markets <query>` - Search for prediction markets
 - `/clear` - Clear conversation history
+- `/alerts` - Start intel alert setup
 - `/help` - Show all commands
 
 **Trading:**
