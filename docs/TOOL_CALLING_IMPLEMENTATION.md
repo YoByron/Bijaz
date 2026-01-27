@@ -951,3 +951,11 @@ LLM: [calls twitter_search with query "Trump trial"]
 - [x] Update system prompt
 - [x] Add tests for Twitter search tool (3 tests)
 - [x] Handle rate limit errors gracefully (falls back to SerpAPI)
+
+---
+
+## Next: Web Tools (Phase 10 & 11)
+
+See [WEB_TOOLS_IMPLEMENTATION.md](./WEB_TOOLS_IMPLEMENTATION.md) for:
+- **Phase 10:** `web_search` - Search the web via SerpAPI/Brave
+- **Phase 11:** `web_fetch` - Fetch and extract web page content

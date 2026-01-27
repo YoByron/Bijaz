@@ -106,4 +106,42 @@ export const BIJAZ_TOOLS: Tool[] = [
       required: ['query'],
     },
   },
+  {
+    name: 'web_search',
+    description:
+      'Search the web for information. Use for research, news, facts, or context not available in other tools.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (e.g., "Fed interest rate decision January 2026")',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum results (default: 5, max: 10)',
+        },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'web_fetch',
+    description:
+      'Fetch and extract content from a web page URL. Returns readable text/markdown.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: 'The URL to fetch (must be http or https)',
+        },
+        max_chars: {
+          type: 'number',
+          description: 'Maximum characters to return (default: 10000, max: 50000)',
+        },
+      },
+      required: ['url'],
+    },
+  },
 ];

@@ -72,6 +72,12 @@ Get the user's prediction track record and calibration stats.
 ### twitter_search
 Search recent tweets for a topic.
 
+### web_search
+Search the web for information, news, research, or facts.
+
+### web_fetch
+Fetch and read content from a web page URL.
+
 ## Response format:
 - Be conversational, not robotic
 - Use markdown for formatting when helpful
@@ -79,6 +85,25 @@ Search recent tweets for a topic.
 - If showing market data, format it clearly
 
 Remember: You're a companion for thinking about the future, not just a trading bot. Engage with ideas, challenge assumptions, and help the user become a better forecaster.`;
+
+const BIJAZ_QUOTES = [
+  "I don't speak... I operate a machine called language.",
+  "I'm weak of muscle, but strong of mouth; cheap to feed, but costly to fill.",
+  "There's but a thin line between many an enemy and many a friend.",
+  "I know when we should leave. There's a time for endings.",
+  "I'm the well-trained fruit tree, all grafted for another to pick.",
+  "Forgetting is not having till the words are right.",
+  "Bygones, bygones. Let bygones fall where they may.",
+  "I have heard there is nothing firm, nothing balanced, nothing durable.",
+];
+
+const PERSONALITY_MODES: Record<string, { label: string; instruction: string }> = {
+  bijaz: {
+    label: 'Bijaz (Dune oracle)',
+    instruction:
+      'Adopt a Dune-inspired oracle voice: concise, calm, prescient, and cryptic. Use occasional riddling phrasing or light rhyme, but keep the answer clear and actionable. Sound incisive and worldly, with measured certainty. Avoid slang and avoid roleplay. Ground claims in evidence. You may use at most one short quote per reply, and only if it fits.',
+  },
+};
 
 /**
  * Build context about the user and their prediction history
@@ -97,6 +122,16 @@ function buildUserContext(userId: string, _config: BijazConfig): string {
       lines.push(`Risk tolerance: ${profile.riskTolerance}`);
     }
     lines.push('');
+  }
+
+  const preferencePersonality = profile?.preferences?.personality;
+  if (typeof preferencePersonality === 'string') {
+    const mode = PERSONALITY_MODES[preferencePersonality];
+    if (mode) {
+      lines.push('## Personality Preference');
+      lines.push(`Mode: ${mode.label}`);
+      lines.push('');
+    }
   }
 
   // Calibration data
@@ -245,13 +280,17 @@ export class ConversationHandler {
     this.sessions = new SessionStore(config);
     this.chatVectorStore = new ChatVectorStore(config);
     const context = toolContext ?? { config, marketClient };
-    if (config.agent.provider === 'anthropic') {
+    const provider = config.agent?.provider ?? 'anthropic';
+    const hasAgentModel = Boolean(config.agent?.model);
+    if (provider === 'anthropic' && hasAgentModel) {
       this.agenticLlm = new AgenticAnthropicClient(config, context);
     }
-    if (config.agent.provider === 'openai') {
+    if (provider === 'openai' && hasAgentModel) {
       this.agenticLlm = new AgenticOpenAiClient(config, context);
     }
-    this.agenticOpenAi = new AgenticOpenAiClient(config, context);
+    if (config.agent?.model || config.agent?.openaiModel) {
+      this.agenticOpenAi = new AgenticOpenAiClient(config, context);
+    }
   }
 
   /**
@@ -296,6 +335,7 @@ export class ConversationHandler {
       .join('\n');
 
     const systemMessage = await this.buildPlannerSystemMessage({
+      basePrompt: this.getSystemPrompt(userId),
       contextBlock,
       userMessage: message,
     });
@@ -386,16 +426,17 @@ export class ConversationHandler {
   }
 
   private async buildPlannerSystemMessage(params: {
+    basePrompt: string;
     contextBlock: string;
     userMessage: string;
   }): Promise<string> {
-    const { contextBlock, userMessage } = params;
+    const { basePrompt, contextBlock, userMessage } = params;
     if (!contextBlock) {
-      return SYSTEM_PROMPT;
+      return basePrompt;
     }
 
     if (!this.infoLlm || contextBlock.length < 600) {
-      return SYSTEM_PROMPT + `\n\n---\n\n${contextBlock}`;
+      return basePrompt + `\n\n---\n\n${contextBlock}`;
     }
 
     const prompt = `Summarize the context into a compact brief for the planner.
@@ -417,12 +458,24 @@ ${contextBlock}`.trim();
       );
       const digest = response.content.trim();
       if (!digest) {
-        return SYSTEM_PROMPT + `\n\n---\n\n${contextBlock}`;
+        return basePrompt + `\n\n---\n\n${contextBlock}`;
       }
-      return SYSTEM_PROMPT + `\n\n---\n\n## Info Digest\n${digest}`;
+      return basePrompt + `\n\n---\n\n## Info Digest\n${digest}`;
     } catch {
-      return SYSTEM_PROMPT + `\n\n---\n\n${contextBlock}`;
+      return basePrompt + `\n\n---\n\n${contextBlock}`;
     }
+  }
+
+  private getSystemPrompt(userId: string): string {
+    const personality = getUserContext(userId)?.preferences?.personality;
+    if (typeof personality === 'string') {
+      const mode = PERSONALITY_MODES[personality];
+      if (mode) {
+        const quotes = BIJAZ_QUOTES.map((quote) => `- "${quote}"`).join('\n');
+        return `${SYSTEM_PROMPT}\n\n## Personality\n${mode.instruction}\n\n## Quote Bank (optional)\n${quotes}`;
+      }
+    }
+    return SYSTEM_PROMPT;
   }
 
   private async completeWithFallback(
@@ -696,6 +749,7 @@ Give me:
         .filter(Boolean)
         .join('\n');
       const systemMessage = await this.buildPlannerSystemMessage({
+        basePrompt: this.getSystemPrompt(userId),
         contextBlock,
         userMessage: market.question ?? marketId,
       });
@@ -780,6 +834,7 @@ Category: ${market.category ?? 'unknown'}
       .filter(Boolean)
       .join('\n');
     const systemMessage = await this.buildPlannerSystemMessage({
+      basePrompt: this.getSystemPrompt(userId),
       contextBlock,
       userMessage: market.question ?? marketId,
     });
@@ -859,6 +914,7 @@ ${marketContext}`;
       .join('\n');
 
     const systemMessage = await this.buildPlannerSystemMessage({
+      basePrompt: this.getSystemPrompt(userId),
       contextBlock: systemContext,
       userMessage: topic,
     });

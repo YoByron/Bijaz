@@ -2,6 +2,9 @@ import type { BijazConfig } from './config.js';
 import type { Market, PolymarketMarketClient } from '../execution/polymarket/markets.js';
 import { listCalibrationSummaries } from '../memory/calibration.js';
 import { listRecentIntel, searchIntel, type StoredIntel } from '../intel/store.js';
+import { Readability } from '@mozilla/readability';
+import { JSDOM } from 'jsdom';
+import { isIP } from 'node:net';
 
 export interface ToolExecutorContext {
   config: BijazConfig;
@@ -79,6 +82,41 @@ export async function executeToolCall(
           success: false,
           error: `Twitter search failed: ${twitterResult.error}. SerpAPI fallback: ${serpResult.error}`,
         };
+      }
+
+      case 'web_search': {
+        const query = String(toolInput.query ?? '').trim();
+        const limit = Math.min(Math.max(Number(toolInput.limit ?? 5), 1), 10);
+        if (!query) {
+          return { success: false, error: 'Missing query' };
+        }
+
+        const serpResult = await searchWebViaSerpApi(query, limit);
+        if (serpResult.success) {
+          return serpResult;
+        }
+
+        const braveResult = await searchWebViaBrave(query, limit);
+        if (braveResult.success) {
+          return braveResult;
+        }
+
+        return {
+          success: false,
+          error: `Web search failed: SerpAPI: ${serpResult.error}. Brave: ${braveResult.error}`,
+        };
+      }
+
+      case 'web_fetch': {
+        const url = String(toolInput.url ?? '').trim();
+        const maxChars = Math.min(Math.max(Number(toolInput.max_chars ?? 10000), 100), 50000);
+        if (!url) {
+          return { success: false, error: 'Missing URL' };
+        }
+        if (!isSafeUrl(url)) {
+          return { success: false, error: 'URL is not allowed' };
+        }
+        return fetchAndExtract(url, maxChars);
       }
 
       default:
@@ -264,5 +302,232 @@ async function searchTwitterViaSerpApi(
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return { success: false, error: message };
+  }
+}
+
+async function searchWebViaSerpApi(
+  query: string,
+  limit: number
+): Promise<ToolResult> {
+  const apiKey = process.env.SERPAPI_KEY;
+  if (!apiKey) {
+    return { success: false, error: 'SerpAPI key not configured' };
+  }
+
+  try {
+    const url = new URL('https://serpapi.com/search.json');
+    url.searchParams.set('engine', 'google');
+    url.searchParams.set('q', query);
+    url.searchParams.set('num', String(limit));
+    url.searchParams.set('api_key', apiKey);
+
+    const response = await fetch(url.toString());
+    if (!response.ok) {
+      return { success: false, error: `SerpAPI: ${response.status}` };
+    }
+
+    const data = (await response.json()) as {
+      organic_results?: Array<{
+        title?: string;
+        link?: string;
+        snippet?: string;
+        date?: string;
+        source?: string;
+      }>;
+    };
+
+    const results = (data.organic_results ?? []).slice(0, limit).map((item) => ({
+      title: item.title ?? '',
+      url: item.link ?? '',
+      snippet: item.snippet ?? '',
+      date: item.date ?? null,
+      source: item.source ?? null,
+    }));
+
+    return { success: true, data: { query, provider: 'serpapi', results } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: message };
+  }
+}
+
+async function searchWebViaBrave(
+  query: string,
+  limit: number
+): Promise<ToolResult> {
+  const apiKey = process.env.BRAVE_API_KEY;
+  if (!apiKey) {
+    return { success: false, error: 'Brave API key not configured' };
+  }
+
+  try {
+    const url = new URL('https://api.search.brave.com/res/v1/web/search');
+    url.searchParams.set('q', query);
+    url.searchParams.set('count', String(limit));
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        Accept: 'application/json',
+        'X-Subscription-Token': apiKey,
+      },
+    });
+
+    if (!response.ok) {
+      return { success: false, error: `Brave: ${response.status}` };
+    }
+
+    const data = (await response.json()) as {
+      web?: {
+        results?: Array<{
+          title?: string;
+          url?: string;
+          description?: string;
+          age?: string;
+        }>;
+      };
+    };
+
+    const results = (data.web?.results ?? []).slice(0, limit).map((item) => ({
+      title: item.title ?? '',
+      url: item.url ?? '',
+      snippet: item.description ?? '',
+      date: item.age ?? null,
+    }));
+
+    return { success: true, data: { query, provider: 'brave', results } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: message };
+  }
+}
+
+function isSafeUrl(rawUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return false;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+    return false;
+  }
+  if (hostname === 'metadata.google.internal') {
+    return false;
+  }
+
+  const ipType = isIP(hostname);
+  if (ipType === 0) {
+    return true;
+  }
+
+  if (ipType === 4) {
+    const parts = hostname.split('.').map((part) => Number(part));
+    if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) {
+      return false;
+    }
+    const [a, b] = parts;
+    if (a === 10 || a === 127) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    return true;
+  }
+
+  if (ipType === 6) {
+    const normalized = hostname.replace(/^\[/, '').replace(/\]$/, '');
+    if (normalized === '::1') return false;
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return false;
+    if (normalized.startsWith('fe80')) return false;
+  }
+
+  return true;
+}
+
+async function fetchAndExtract(url: string, maxChars: number): Promise<ToolResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; Bijaz/1.0; +https://github.com/bijaz)',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return { success: false, error: `Fetch failed: ${response.status}` };
+    }
+
+    const maxBytes = 2_000_000;
+    const contentLength = response.headers.get('content-length');
+    if (contentLength && Number(contentLength) > maxBytes) {
+      return { success: false, error: 'Response too large' };
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > maxBytes) {
+      return { success: false, error: 'Response too large' };
+    }
+
+    const body = new TextDecoder().decode(buffer);
+
+    if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
+      const truncated = body.length > maxChars;
+      return {
+        success: true,
+        data: {
+          url,
+          title: null,
+          content: body.slice(0, maxChars),
+          truncated,
+        },
+      };
+    }
+
+    const dom = new JSDOM(body, { url });
+    const reader = new Readability(dom.window.document);
+    const article = reader.parse();
+
+    if (!article) {
+      const text = dom.window.document.body?.textContent ?? '';
+      const cleaned = text.replace(/\s+/g, ' ').trim();
+      return {
+        success: true,
+        data: {
+          url,
+          title: dom.window.document.title ?? null,
+          content: cleaned.slice(0, maxChars),
+          truncated: cleaned.length > maxChars,
+        },
+      };
+    }
+
+    const content = article.textContent.replace(/\s+/g, ' ').trim();
+    return {
+      success: true,
+      data: {
+        url,
+        title: article.title ?? null,
+        byline: article.byline ?? null,
+        content: content.slice(0, maxChars),
+        truncated: content.length > maxChars,
+        length: article.length,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: message };
+  } finally {
+    clearTimeout(timeout);
   }
 }

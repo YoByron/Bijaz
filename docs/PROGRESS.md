@@ -19,7 +19,10 @@ Tool calling is implemented for Anthropic and OpenAI (fallback on rate limits).
 | 3. Memory & Predictions | COMPLETE | Prediction storage, calibration |
 | 4. Intelligence Layer | COMPLETE | RSS, NewsAPI, vector storage |
 | 5. Agent Reasoning | COMPLETE | LLM works with tool calling |
-| **5.5. Tool Calling** | **COMPLETE** | See [TOOL_CALLING_IMPLEMENTATION.md](./TOOL_CALLING_IMPLEMENTATION.md) |
+| 5.5. Tool Calling | COMPLETE | See [TOOL_CALLING_IMPLEMENTATION.md](./TOOL_CALLING_IMPLEMENTATION.md) |
+| **9. Twitter Search** | **COMPLETE** | Real-time Twitter + SerpAPI fallback |
+| **10. Web Search** | **PLANNED** | See [WEB_TOOLS_IMPLEMENTATION.md](./WEB_TOOLS_IMPLEMENTATION.md) |
+| **11. Web Fetch** | **PLANNED** | Readability-based page extraction |
 | 6. Channel Integration | IN PROGRESS | Tool calling unblocked |
 | 7. Polish & Testing | NOT STARTED | |
 
@@ -48,6 +51,25 @@ Tool calling is implemented for Anthropic and OpenAI (fallback on rate limits).
 - [x] Update system prompt with twitter_search
 - [x] Test hybrid fallback behavior (3 tests passing)
 
+### Next: Phase 10 & 11 - Web Tools
+
+See [WEB_TOOLS_IMPLEMENTATION.md](./WEB_TOOLS_IMPLEMENTATION.md)
+
+**Phase 10: Web Search**
+- [ ] Add `web_search` tool schema
+- [ ] Implement SerpAPI search (primary)
+- [ ] Implement Brave Search fallback
+- [ ] Update system prompt
+- [ ] Add tests
+
+**Phase 11: Web Fetch**
+- [ ] Add `web_fetch` tool schema
+- [ ] Install `@mozilla/readability`, `jsdom`
+- [ ] Implement `fetchAndExtract()` with Readability
+- [ ] Add timeout and SSRF protection
+- [ ] Update system prompt
+- [ ] Add tests
+
 ---
 
 ## Recent Changes
@@ -57,13 +79,14 @@ Tool calling is implemented for Anthropic and OpenAI (fallback on rate limits).
 - Updated system prompt to reflect real tools
 - Added unit tests for tool schemas/executor and OpenAI tool loop
 - **Tool calling implementation:**
-  - `src/core/tool-schemas.ts` - 5 tools defined
+  - `src/core/tool-schemas.ts` - 6 tools defined
   - `src/core/tool-executor.ts` - Tool execution logic
   - `src/core/llm.ts` - AgenticAnthropicClient + AgenticOpenAiClient
   - `src/core/conversation.ts` - Uses agentic client
   - `src/core/agent.ts` - Passes tool context
   - Tests created for tool calling
-- **Added Phase 9:** Real-time Twitter search (hybrid Twitter API + SerpAPI)
+- **Phase 9 Complete:** Real-time Twitter search with hybrid fallback (Twitter API v2 + SerpAPI)
+- **Phase 10 & 11 Planned:** Web search and web fetch tools - see [WEB_TOOLS_IMPLEMENTATION.md](./WEB_TOOLS_IMPLEMENTATION.md)
 
 ---
 

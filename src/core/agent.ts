@@ -192,6 +192,24 @@ export class BijazAgent {
       return JSON.stringify(profile, null, 2);
     }
 
+    // Command: /persona [mode|list|off]
+    if (trimmed.startsWith('/persona')) {
+      const payload = trimmed.replace('/persona', '').trim();
+      const current = getUserContext(sender)?.preferences?.personality as string | undefined;
+      if (!payload || payload === 'list') {
+        return `Available personas: bijaz\nCurrent: ${current ?? 'default'}`;
+      }
+      if (payload === 'off' || payload === 'default') {
+        updateUserContext(sender, { preferences: { personality: undefined } });
+        return 'Personality reset to default.';
+      }
+      if (payload === 'bijaz') {
+        updateUserContext(sender, { preferences: { personality: 'bijaz' } });
+        return 'Personality set to bijaz.';
+      }
+      return 'Unknown persona. Use /persona list to see options.';
+    }
+
     // Command: /setpref key=value
     if (trimmed.startsWith('/setpref ')) {
       const payload = trimmed.replace('/setpref ', '').trim();
@@ -409,6 +427,7 @@ Just type naturally to chat about predictions, events, or markets.
 /intel - Fetch latest news
 /resolve - Resolve pending predictions
 /profile - Show your profile
+/persona [mode|list|off] - Set personality mode
 /setpref key=value - Set preferences
 
 **Examples:**
