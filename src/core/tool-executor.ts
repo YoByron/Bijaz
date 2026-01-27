@@ -322,6 +322,7 @@ function normalizePrice(market: Market, outcome: 'Yes' | 'No'): number | null {
   const fromMap =
     market.prices?.[outcome] ??
     market.prices?.[outcome.toUpperCase()] ??
+    market.prices?.[outcome.toLowerCase()] ??
     undefined;
   if (typeof fromMap === 'number') {
     return fromMap;
@@ -329,6 +330,17 @@ function normalizePrice(market: Market, outcome: 'Yes' | 'No'): number | null {
   if (typeof fromMap === 'string') {
     const parsed = Number(fromMap);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (market.prices && typeof market.prices === 'object') {
+    const key = outcome === 'Yes' ? '0' : '1';
+    const indexed = (market.prices as Record<string, unknown>)[key];
+    if (typeof indexed === 'number') {
+      return indexed;
+    }
+    if (typeof indexed === 'string') {
+      const parsed = Number(indexed);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
   }
   if (Array.isArray(market.prices)) {
     const index = outcome === 'Yes' ? 0 : 1;
