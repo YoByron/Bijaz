@@ -378,6 +378,15 @@ bijaz markets sync --limit 200
 bijaz trade buy "French Election - Le Pen" YES 0.35 --amount 50
 ```
 
+### Cloud Install (Hetzner / Ubuntu)
+
+Use the installer script to set up Node 22, install dependencies, generate config + .env,
+and register a systemd service that keeps Bijaz running.
+
+```bash
+bash scripts/install_hetzner.sh
+```
+
 ### Wallet (CLI)
 ```bash
 bijaz wallet create
