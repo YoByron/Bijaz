@@ -83,10 +83,29 @@ export class PolymarketMarketClient {
       raw.outcomes ??
       raw.outcomesArray ??
       (typeof raw.outcomes === 'string' ? JSON.parse(raw.outcomes) : []);
-    const prices =
-      raw.prices ??
-      raw.outcomePrices ??
-      (typeof raw.prices === 'string' ? JSON.parse(raw.prices) : {});
+
+    let prices: Record<string, number> | number[] = {};
+    if (raw.prices) {
+      prices = typeof raw.prices === 'string' ? JSON.parse(raw.prices) : raw.prices;
+    } else if (raw.outcomePrices) {
+      prices =
+        typeof raw.outcomePrices === 'string'
+          ? JSON.parse(raw.outcomePrices)
+          : raw.outcomePrices;
+    }
+
+    if (Array.isArray(prices)) {
+      const normalizedOutcomes = Array.isArray(outcomes) ? outcomes : [];
+      const mapped: Record<string, number> = {};
+      for (let i = 0; i < prices.length; i += 1) {
+        const key = String(normalizedOutcomes[i] ?? i);
+        const value = Number(prices[i]);
+        if (!Number.isNaN(value)) {
+          mapped[key] = value;
+        }
+      }
+      prices = mapped;
+    }
 
     // Extract token IDs - critical for order placement
     let tokens: MarketToken[] = [];
