@@ -461,20 +461,24 @@ async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
 }
 
 function resolveCurrentPrice(position: {
-  currentPrices?: Record<string, unknown> | null;
+  currentPrices?: Record<string, unknown> | number[] | null;
   predictedOutcome?: string;
 }): number | null {
   const currentPrices = position.currentPrices ?? undefined;
   if (!currentPrices) return null;
   const outcome = (position.predictedOutcome ?? 'YES').toUpperCase();
-  const direct = currentPrices[outcome] ?? currentPrices[outcome.toLowerCase()];
-  if (typeof direct === 'number') {
-    return direct;
-  }
+
+  // Handle array format [yesPrice, noPrice]
   if (Array.isArray(currentPrices)) {
     const index = outcome === 'YES' ? 0 : 1;
     const value = currentPrices[index];
     return typeof value === 'number' ? value : null;
+  }
+
+  // Handle record format { YES: price, NO: price }
+  const direct = currentPrices[outcome] ?? currentPrices[outcome.toLowerCase()];
+  if (typeof direct === 'number') {
+    return direct;
   }
   return null;
 }
