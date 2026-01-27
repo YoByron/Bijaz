@@ -435,7 +435,7 @@ function isSafeUrl(rawUrl: string): boolean {
     if (a === 10 || a === 127) return false;
     if (a === 169 && b === 254) return false;
     if (a === 192 && b === 168) return false;
-    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 172 && typeof b === 'number' && b >= 16 && b <= 31) return false;
     return true;
   }
 
