@@ -67,6 +67,9 @@ Search for prediction markets by topic. Use when discussing events to find relev
 ### market_get
 Get detailed info about a specific market by ID.
 
+### market_categories
+List market categories with counts. Useful for browsing or filtering.
+
 ### intel_search
 Search news/intel database for recent information about a topic.
 

@@ -35,6 +35,20 @@ export const BIJAZ_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'market_categories',
+    description: 'List market categories with counts. Useful for browsing and filtering.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of categories (default: 20)',
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'intel_search',
     description:
       'Search the intel/news database for recent information about a topic.',

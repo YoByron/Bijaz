@@ -1,6 +1,7 @@
 import type { BijazConfig } from './config.js';
 import type { Market, PolymarketMarketClient } from '../execution/polymarket/markets.js';
 import { listCalibrationSummaries } from '../memory/calibration.js';
+import { listMarketCategories } from '../memory/market_cache.js';
 import { listRecentIntel, searchIntel } from '../intel/store.js';
 import { IntelVectorStore } from '../intel/vectorstore.js';
 
@@ -48,6 +49,12 @@ export class ToolRegistry {
       const limit = Number(params.limit ?? 5);
       const markets = await ctx.marketClient.searchMarkets(query, limit);
       return { markets };
+    };
+
+    this.handlers['market.categories'] = async (_ctx, params) => {
+      const limit = Number(params.limit ?? 20);
+      const categories = listMarketCategories(limit);
+      return { categories };
     };
 
     this.handlers['intel.search'] = async (_ctx, params) => {

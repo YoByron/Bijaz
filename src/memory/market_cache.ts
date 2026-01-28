@@ -190,7 +190,53 @@ export function listMarketCache(limit = 50): MarketCacheRecord[] {
 
 export function searchMarketCache(query: string, limit = 50): MarketCacheRecord[] {
   const db = openDatabase();
-  const needle = `%${query.toLowerCase()}%`;
+  const categoryMatch = query.match(/\b(?:category|cat):([^\s]+)/i);
+  const category = categoryMatch?.[1]?.toLowerCase();
+  const cleanedQuery = categoryMatch
+    ? query.replace(categoryMatch[0], '').trim()
+    : query.trim();
+
+  const intradayPattern = /\b(15[-\s]*min(?:ute)?|15m|intraday|up\s*or\s*down|updown|short[-\s]*term)\b/i;
+  const wantsIntraday = intradayPattern.test(cleanedQuery);
+  const assetPattern = /\b(bitcoin|btc|ethereum|eth|solana|sol|xrp)\b/i;
+  const assetMatch = cleanedQuery.match(assetPattern);
+  const asset = assetMatch?.[1]?.toLowerCase();
+
+  const baseQuery = cleanedQuery.replace(intradayPattern, ' ').trim();
+  const needle = baseQuery ? `%${baseQuery.toLowerCase()}%` : null;
+
+  const whereClauses: string[] = ['resolved = 0'];
+  const params: Array<string | number> = [];
+
+  if (category) {
+    whereClauses.push('LOWER(category) LIKE ?');
+    params.push(`%${category}%`);
+  }
+
+  const searchFilters: string[] = [];
+  if (needle) {
+    searchFilters.push('(LOWER(question) LIKE ? OR LOWER(description) LIKE ?)');
+    params.push(needle, needle);
+  }
+
+  if (wantsIntraday) {
+    searchFilters.push("LOWER(question) LIKE '%up or down%'");
+    searchFilters.push("(LOWER(question) LIKE '%am%' OR LOWER(question) LIKE '%pm%')");
+  }
+
+  if (asset) {
+    searchFilters.push('LOWER(question) LIKE ?');
+    params.push(`%${asset}%`);
+  }
+
+  if (searchFilters.length > 0) {
+    whereClauses.push(searchFilters.map((filter) => `(${filter})`).join(' AND '));
+  }
+
+  if (searchFilters.length === 0 && !category) {
+    return listMarketCache(limit);
+  }
+
   const rows = db
     .prepare(
       `
@@ -209,13 +255,12 @@ export function searchMarketCache(query: string, limit = 50): MarketCacheRecord[
           created_at as createdAt,
           updated_at as updatedAt
         FROM market_cache
-        WHERE resolved = 0
-          AND (LOWER(question) LIKE ? OR LOWER(description) LIKE ?)
+        WHERE ${whereClauses.join(' AND ')}
         ORDER BY volume DESC
         LIMIT ?
       `
     )
-    .all(needle, needle, limit) as Array<Record<string, unknown>>;
+    .all(...params, limit) as Array<Record<string, unknown>>;
 
   return rows.map((row) => ({
     id: String(row.id),
@@ -249,4 +294,29 @@ export function getMarketCacheStats(): { count: number; latestUpdatedAt: string 
     count: Number(row?.count ?? 0),
     latestUpdatedAt: (row?.latestUpdatedAt as string | null) ?? null,
   };
+}
+
+export function listMarketCategories(limit = 20): Array<{ category: string; count: number }> {
+  const db = openDatabase();
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          category,
+          COUNT(*) as count
+        FROM market_cache
+        WHERE resolved = 0
+          AND category IS NOT NULL
+          AND category != ''
+        GROUP BY category
+        ORDER BY count DESC
+        LIMIT ?
+      `
+    )
+    .all(limit) as Array<{ category: string; count: number }>;
+
+  return rows.map((row) => ({
+    category: row.category,
+    count: Number(row.count ?? 0),
+  }));
 }

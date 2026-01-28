@@ -5,6 +5,7 @@ import type { LimitCheckResult } from '../execution/wallet/limits.js';
 import { listCalibrationSummaries } from '../memory/calibration.js';
 import { listRecentIntel, searchIntel, type StoredIntel } from '../intel/store.js';
 import { listOpenPositions, listPredictions, createPrediction } from '../memory/predictions.js';
+import { listMarketCategories } from '../memory/market_cache.js';
 import { checkExposureLimits } from './exposure.js';
 import { loadKeystore } from '../execution/wallet/keystore.js';
 
@@ -51,6 +52,12 @@ export async function executeToolCall(
         const marketId = String(toolInput.market_id ?? '');
         const market = await ctx.marketClient.getMarket(marketId);
         return { success: true, data: formatMarketForTool(market) };
+      }
+
+      case 'market_categories': {
+        const limit = Math.min(Number(toolInput.limit ?? 20), 100);
+        const categories = listMarketCategories(limit);
+        return { success: true, data: categories };
       }
 
       case 'intel_search': {
