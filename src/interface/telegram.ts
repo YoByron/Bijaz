@@ -19,11 +19,17 @@ export class TelegramAdapter implements ChannelAdapter {
   }
 
   async sendMessage(target: string, text: string): Promise<void> {
-    await fetch(`https://api.telegram.org/bot${this.token}/sendMessage`, {
+    const response = await fetch(`https://api.telegram.org/bot${this.token}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ chat_id: target, text }),
     });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      throw new Error(
+        `Telegram send failed (${response.status}): ${body || 'no response body'}`
+      );
+    }
   }
 
   startPolling(onMessage: (msg: IncomingMessage) => Promise<void>): void {

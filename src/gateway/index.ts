@@ -112,11 +112,25 @@ const onIncoming = async (
     threadId: message.threadId,
   }).sessionKey;
   const reply = await activeAgent.handleMessage(session, message.text);
+  if (!reply || reply.trim().length === 0) {
+    logger.warn(`Empty reply for ${message.channel}:${message.senderId}`);
+    return;
+  }
   if (message.channel === 'telegram' && telegram) {
-    await telegram.sendMessage(message.senderId, reply);
+    try {
+      await telegram.sendMessage(message.senderId, reply);
+      logger.info(`Telegram reply sent to ${message.senderId}`);
+    } catch (error) {
+      logger.error(`Telegram send failed for ${message.senderId}`, error);
+    }
   }
   if (message.channel === 'whatsapp' && whatsapp) {
-    await whatsapp.sendMessage(message.senderId, reply);
+    try {
+      await whatsapp.sendMessage(message.senderId, reply);
+      logger.info(`WhatsApp reply sent to ${message.senderId}`);
+    } catch (error) {
+      logger.error(`WhatsApp send failed for ${message.senderId}`, error);
+    }
   }
 };
 
@@ -141,12 +155,22 @@ if (briefingConfig?.enabled) {
     const channels = briefingConfig.channels ?? [];
     if (channels.includes('telegram') && telegram) {
       for (const chatId of config.channels.telegram.allowedChatIds ?? []) {
-        await telegram.sendMessage(String(chatId), message);
+        try {
+          await telegram.sendMessage(String(chatId), message);
+          logger.info(`Telegram briefing sent to ${chatId}`);
+        } catch (error) {
+          logger.error(`Telegram briefing failed for ${chatId}`, error);
+        }
       }
     }
     if (channels.includes('whatsapp') && whatsapp) {
       for (const number of config.channels.whatsapp.allowedNumbers ?? []) {
-        await whatsapp.sendMessage(number, message);
+        try {
+          await whatsapp.sendMessage(number, message);
+          logger.info(`WhatsApp briefing sent to ${number}`);
+        } catch (error) {
+          logger.error(`WhatsApp briefing failed for ${number}`, error);
+        }
       }
     }
     lastBriefingDate = today;
@@ -306,12 +330,22 @@ if (dailyReportConfig?.enabled) {
     const channels = dailyReportConfig.channels ?? [];
     if (channels.includes('telegram') && telegram) {
       for (const chatId of config.channels.telegram.allowedChatIds ?? []) {
-        await telegram.sendMessage(String(chatId), report);
+        try {
+          await telegram.sendMessage(String(chatId), report);
+          logger.info(`Telegram daily report sent to ${chatId}`);
+        } catch (error) {
+          logger.error(`Telegram daily report failed for ${chatId}`, error);
+        }
       }
     }
     if (channels.includes('whatsapp') && whatsapp) {
       for (const number of config.channels.whatsapp.allowedNumbers ?? []) {
-        await whatsapp.sendMessage(number, report);
+        try {
+          await whatsapp.sendMessage(number, report);
+          logger.info(`WhatsApp daily report sent to ${number}`);
+        } catch (error) {
+          logger.error(`WhatsApp daily report failed for ${number}`, error);
+        }
       }
     }
   });
@@ -469,12 +503,22 @@ async function sendIntelAlerts(
   const message = `📰 **Intel Alert**\n\n${alerts.join('\n')}`;
   if (settings.channels.includes('telegram') && telegram) {
     for (const chatId of config.channels.telegram.allowedChatIds ?? []) {
-      await telegram.sendMessage(String(chatId), message);
+      try {
+        await telegram.sendMessage(String(chatId), message);
+        logger.info(`Telegram intel alert sent to ${chatId}`);
+      } catch (error) {
+        logger.error(`Telegram intel alert failed for ${chatId}`, error);
+      }
     }
   }
   if (settings.channels.includes('whatsapp') && whatsapp) {
     for (const number of config.channels.whatsapp.allowedNumbers ?? []) {
-      await whatsapp.sendMessage(number, message);
+      try {
+        await whatsapp.sendMessage(number, message);
+        logger.info(`WhatsApp intel alert sent to ${number}`);
+      } catch (error) {
+        logger.error(`WhatsApp intel alert failed for ${number}`, error);
+      }
     }
   }
 }
