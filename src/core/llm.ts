@@ -966,6 +966,7 @@ class FallbackLlmClient implements LlmClient {
 
 function isRateLimitError(error: unknown): boolean {
   const err = error as { status?: number; message?: string };
+  if (err?.status && err.status >= 500 && err.status <= 599) return true;
   if (err?.status === 429) return true;
   if (err?.status === 402) return true;
   const message = (err?.message ?? '').toLowerCase();
@@ -979,7 +980,10 @@ function isRateLimitError(error: unknown): boolean {
     message.includes('payment') ||
     message.includes('quota') ||
     message.includes('insufficient') ||
-    message.includes('balance is too low')
+    message.includes('balance is too low') ||
+    message.includes('circuit_open') ||
+    message.includes('circuit open') ||
+    message.includes('circuit breaker')
   );
 }
 
