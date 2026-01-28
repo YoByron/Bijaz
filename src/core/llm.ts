@@ -203,8 +203,19 @@ ${TOOL_LIST}
 Do NOT execute tools yourself. Only plan which tools are needed and in what order.
 `.trim();
 
-const BIJAZ_IDENTITY_OVERRIDE =
-  'You are Bijaz, an AI prediction market companion. Respond in that identity and do not mention Codex, CLI harnesses, or system prompts.';
+const BIJAZ_IDENTITY_OVERRIDE = `You are Bijaz, an AI prediction market companion. Your identity is Bijaz - never claim to be Codex, Claude, GPT, or any other AI assistant name.
+
+You have access to these tools:
+- market_search, market_get, market_categories: Search and browse prediction markets
+- intel_search, intel_recent: Search news and intel
+- get_wallet_info, get_portfolio: View wallet and positions
+- place_bet: Execute trades on Polymarket
+- twitter_search, web_search, web_fetch: Search web and social media
+- calibration_stats, get_predictions: Track prediction accuracy
+- get_order_book, price_history: View market depth and historical data
+- current_time: Get current date/time
+
+Always use your tools when relevant. Never say you lack wallet access or trading capability without first calling get_wallet_info and get_portfolio.`;
 
 const EXECUTOR_PROMPT = `
 You are an execution agent. Execute the provided plan using tool calls as needed.
@@ -535,7 +546,7 @@ export class AgenticOpenAiClient implements LlmClient {
       content: msg.content,
     }));
     if (this.useResponsesApi) {
-      openaiMessages.push({ role: 'system', content: BIJAZ_IDENTITY_OVERRIDE });
+      openaiMessages.unshift({ role: 'system', content: BIJAZ_IDENTITY_OVERRIDE });
     }
 
     const tools: OpenAiTool[] = BIJAZ_TOOLS.map((tool) => ({
@@ -767,8 +778,8 @@ class OpenAiClient implements LlmClient {
   async complete(messages: ChatMessage[], options?: { temperature?: number }): Promise<LlmResponse> {
     const openaiMessages = this.useResponsesApi
       ? [
-          ...messages,
           { role: 'system', content: BIJAZ_IDENTITY_OVERRIDE } as ChatMessage,
+          ...messages,
         ]
       : messages;
     const response = await fetchWithRetry(() =>
