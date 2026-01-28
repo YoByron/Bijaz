@@ -26,8 +26,10 @@ import { ToolRegistry } from './tools.js';
 import {
   AgenticAnthropicClient,
   AgenticOpenAiClient,
+  FallbackLlmClient,
   OrchestratorClient,
   createAgenticExecutorClient,
+  isRateLimitError,
   wrapWithLimiter,
   shouldUseExecutorModel,
 } from './llm.js';
