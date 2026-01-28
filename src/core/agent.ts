@@ -1,8 +1,12 @@
 import type { BijazConfig } from './config.js';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   createAgenticExecutorClient,
   createExecutorClient,
   createLlmClient,
+  clearIdentityCache,
   OrchestratorClient,
 } from './llm.js';
 import { decideTrade } from './decision.js';
@@ -44,6 +48,7 @@ export class BijazAgent {
     if (config.memory?.dbPath) {
       process.env.BIJAZ_DB_PATH = config.memory.dbPath;
     }
+    bootstrapWorkspaceIdentity(this.config);
     this.llm = createLlmClient(this.config);
     this.infoLlm = createExecutorClient(this.config, this.config.agent.openaiModel, 'openai');
     this.executorLlm = createExecutorClient(this.config);
@@ -664,5 +669,46 @@ Just type naturally to chat about predictions, events, or markets.
       this.limiter.release(decision.amount);
     }
     return result.message;
+  }
+}
+
+function bootstrapWorkspaceIdentity(config: BijazConfig): void {
+  const workspacePath = config.agent?.workspace ?? join(homedir(), '.bijaz');
+  const repoWorkspacePath = join(process.cwd(), 'workspace');
+  if (workspacePath === repoWorkspacePath) {
+    return;
+  }
+
+  const anchorPath = join(workspacePath, 'IDENTITY.md');
+  if (existsSync(anchorPath)) {
+    return;
+  }
+  if (!existsSync(repoWorkspacePath)) {
+    return;
+  }
+
+  try {
+    mkdirSync(workspacePath, { recursive: true });
+  } catch {
+    return;
+  }
+
+  const identityFiles = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'];
+  let copied = false;
+  for (const filename of identityFiles) {
+    const src = join(repoWorkspacePath, filename);
+    const dest = join(workspacePath, filename);
+    if (existsSync(src) && !existsSync(dest)) {
+      try {
+        copyFileSync(src, dest);
+        copied = true;
+      } catch {
+        // Skip any unreadable file
+      }
+    }
+  }
+
+  if (copied) {
+    clearIdentityCache();
   }
 }

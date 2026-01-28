@@ -30,6 +30,7 @@ import {
   OrchestratorClient,
   createAgenticExecutorClient,
   isRateLimitError,
+  loadBijazIdentity,
   wrapWithLimiter,
   shouldUseExecutorModel,
 } from './llm.js';
@@ -51,36 +52,6 @@ const SYSTEM_PROMPT_BASE = `## Operating Rules
 - Reference relevant prediction markets when discussing events
 - Be conversational, not robotic - use markdown when helpful`;
 
-/**
- * Load workspace identity files (like Moltbot's IDENTITY.md, SOUL.md, etc.)
- * These are injected into every prompt to maintain consistent identity.
- */
-function loadWorkspaceIdentity(workspacePath: string): string {
-  // Load in priority order - IDENTITY.md first as the anchor
-  const identityFiles = ['IDENTITY.md', 'SOUL.md', 'USER.md'];
-  const sections: string[] = [];
-
-  for (const filename of identityFiles) {
-    const filepath = join(workspacePath, filename);
-    if (existsSync(filepath)) {
-      try {
-        const content = readFileSync(filepath, 'utf-8').trim();
-        if (content) {
-          sections.push(content);
-        }
-      } catch {
-        // Skip unreadable files
-      }
-    }
-  }
-
-  if (sections.length === 0) {
-    return '';
-  }
-
-  // Identity content comes first, clean and direct
-  return sections.join('\n\n---\n\n');
-}
 
 const BIJAZ_QUOTES = [
   "I don't speak... I operate a machine called language.",
@@ -515,8 +486,7 @@ ${contextBlock}`.trim();
   private getSystemPrompt(userId: string): string {
     // Moltbot pattern: Identity FIRST, then rules
     // This ensures identity anchors the context before anything else
-    const workspacePath = this.config.agent?.workspace?.replace('~', homedir()) ?? join(homedir(), '.bijaz');
-    const workspaceIdentity = loadWorkspaceIdentity(workspacePath);
+    const workspaceIdentity = loadBijazIdentity(this.config);
 
     // Identity comes FIRST - this is the critical difference from before
     let systemPrompt = workspaceIdentity
