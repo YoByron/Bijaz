@@ -491,6 +491,7 @@ export class AgenticOpenAiClient implements LlmClient {
   private model: string;
   private baseUrl: string;
   private toolContext: ToolExecutorContext;
+  private includeTemperature: boolean;
 
   constructor(
     config: BijazConfig,
@@ -500,6 +501,7 @@ export class AgenticOpenAiClient implements LlmClient {
     this.model = modelOverride ?? config.agent.openaiModel ?? config.agent.model;
     this.baseUrl = resolveOpenAiBaseUrl(config);
     this.toolContext = toolContext;
+    this.includeTemperature = !config.agent.useProxy;
   }
 
   async complete(messages: ChatMessage[], options?: AgenticLlmOptions): Promise<LlmResponse> {
@@ -532,7 +534,7 @@ export class AgenticOpenAiClient implements LlmClient {
           },
           body: JSON.stringify({
             model: this.model,
-            temperature,
+            ...(this.includeTemperature ? { temperature } : {}),
             messages: openaiMessages,
             tools,
           }),
@@ -640,10 +642,12 @@ class AnthropicClient implements LlmClient {
 class OpenAiClient implements LlmClient {
   private model: string;
   private baseUrl: string;
+  private includeTemperature: boolean;
 
   constructor(config: BijazConfig, modelOverride?: string) {
     this.model = modelOverride ?? config.agent.model;
     this.baseUrl = resolveOpenAiBaseUrl(config);
+    this.includeTemperature = !config.agent.useProxy;
   }
 
   async complete(messages: ChatMessage[], options?: { temperature?: number }): Promise<LlmResponse> {
@@ -656,7 +660,7 @@ class OpenAiClient implements LlmClient {
         },
         body: JSON.stringify({
           model: this.model,
-          temperature: options?.temperature ?? 0.2,
+          ...(this.includeTemperature ? { temperature: options?.temperature ?? 0.2 } : {}),
           messages,
         }),
       })
