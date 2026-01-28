@@ -4,6 +4,7 @@ import {
   createExecutorClient,
   createLlmClient,
   OrchestratorClient,
+  shouldUseExecutorModel,
 } from './llm.js';
 import { decideTrade } from './decision.js';
 import { Logger } from './logger.js';
@@ -73,7 +74,7 @@ export class BijazAgent {
     );
 
     this.autonomyLlm = this.llm;
-    if (this.config.agent.useExecutorModel) {
+    if (shouldUseExecutorModel(this.config)) {
       const executor = createAgenticExecutorClient(this.config, this.toolContext);
       this.autonomyLlm = new OrchestratorClient(this.llm, executor, this.llm, this.logger);
     }

@@ -144,6 +144,23 @@ export function createAgenticExecutorClient(
   return wrapWithLimiter(new AgenticOpenAiClient(config, toolContext, model));
 }
 
+export function shouldUseExecutorModel(config: BijazConfig): boolean {
+  if (!config.agent.useExecutorModel) {
+    return false;
+  }
+
+  const baseProvider = config.agent.provider ?? 'anthropic';
+  const baseModel = config.agent.model ?? '';
+  const executorProvider = config.agent.executorProvider ?? 'openai';
+  const executorModel =
+    config.agent.executorModel ??
+    config.agent.openaiModel ??
+    config.agent.model ??
+    '';
+
+  return baseProvider !== executorProvider || baseModel !== executorModel;
+}
+
 function resolveOpenAiBaseUrl(config: BijazConfig): string {
   if (config.agent.useProxy) {
     return config.agent.proxyBaseUrl;

@@ -29,6 +29,7 @@ import {
   OrchestratorClient,
   createAgenticExecutorClient,
   wrapWithLimiter,
+  shouldUseExecutorModel,
 } from './llm.js';
 import type { ToolExecutorContext } from './tool-executor.js';
 import { Logger } from './logger.js';
@@ -329,7 +330,7 @@ export class ConversationHandler {
     if (config.agent?.model || config.agent?.openaiModel) {
       this.agenticOpenAi = wrapWithLimiter(new AgenticOpenAiClient(config, context));
     }
-    if (config.agent?.useExecutorModel) {
+    if (shouldUseExecutorModel(config)) {
       const executor = createAgenticExecutorClient(config, context);
       const fallback = this.agenticLlm ?? this.agenticOpenAi;
       this.agenticLlm = new OrchestratorClient(this.llm, executor, fallback, this.logger);
