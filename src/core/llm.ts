@@ -948,7 +948,7 @@ class LocalClient implements LlmClient {
   }
 }
 
-class FallbackLlmClient implements LlmClient {
+export class FallbackLlmClient implements LlmClient {
   constructor(
     private primary: LlmClient,
     private fallback: LlmClient,
@@ -967,7 +967,7 @@ class FallbackLlmClient implements LlmClient {
   }
 }
 
-function isRateLimitError(error: unknown): boolean {
+export function isRateLimitError(error: unknown): boolean {
   const err = error as { status?: number; message?: string };
   if (err?.status && err.status >= 500 && err.status <= 599) return true;
   if (err?.status === 429) return true;
