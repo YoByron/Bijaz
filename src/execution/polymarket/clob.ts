@@ -85,7 +85,7 @@ export interface CLOBOrderResponse {
 }
 
 export interface ApiKeyCredentials {
-  key: string;
+  apiKey: string;
   secret: string;
   passphrase: string;
 }
@@ -388,7 +388,7 @@ export class PolymarketCLOBClient {
       'POLY_ADDRESS': this.wallet?.address ?? '',
       'POLY_SIGNATURE': signature,
       'POLY_TIMESTAMP': String(timestamp),
-      'POLY_API_KEY': this.credentials.key,
+      'POLY_API_KEY': this.credentials.apiKey,
       'POLY_PASSPHRASE': this.credentials.passphrase,
     };
   }

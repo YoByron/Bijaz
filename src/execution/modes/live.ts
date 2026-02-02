@@ -109,12 +109,12 @@ export class LiveExecutor implements ExecutionAdapter {
         // Try to derive existing API key first
         console.log('[LiveExecutor] Deriving API key...');
         const creds = await this.clobClient.deriveApiKey();
-        console.log('[LiveExecutor] Derived API key:', creds.key?.slice(0, 8) + '...');
+        console.log('[LiveExecutor] Derived API key:', creds.apiKey?.slice(0, 8) + '...');
       } catch (err) {
         // If derivation fails, create a new API key
         console.log('[LiveExecutor] Derive failed, creating new API key...', err);
         const creds = await this.clobClient.createApiKey();
-        console.log('[LiveExecutor] Created API key:', creds.key?.slice(0, 8) + '...');
+        console.log('[LiveExecutor] Created API key:', creds.apiKey?.slice(0, 8) + '...');
       }
     }
 
