@@ -307,7 +307,7 @@ export class PolymarketCLOBClient {
   // ==========================================================================
 
   /**
-   * Generate L1 authentication headers (wallet signature).
+   * Generate L1 authentication headers (EIP-712 wallet signature).
    * Used for API key creation.
    */
   private async generateL1Headers(nonce?: number): Promise<Record<string, string>> {
@@ -318,9 +318,33 @@ export class PolymarketCLOBClient {
     const timestamp = Math.floor(Date.now() / 1000);
     const actualNonce = nonce ?? 0;
 
-    // Create the message to sign
-    const message = `${timestamp}${actualNonce}`;
-    const signature = await this.wallet.signMessage(message);
+    // EIP-712 domain for Polymarket CLOB auth
+    const domain = {
+      name: 'ClobAuthDomain',
+      version: '1',
+      chainId: 137, // Polygon
+    };
+
+    // EIP-712 types
+    const types = {
+      ClobAuth: [
+        { name: 'address', type: 'address' },
+        { name: 'timestamp', type: 'string' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'message', type: 'string' },
+      ],
+    };
+
+    // Message to sign
+    const value = {
+      address: this.wallet.address,
+      timestamp: String(timestamp),
+      nonce: actualNonce,
+      message: 'This message attests that I control the given wallet',
+    };
+
+    // Sign with EIP-712 typed data
+    const signature = await this.wallet._signTypedData(domain, types, value);
 
     return {
       'POLY_ADDRESS': this.wallet.address,
