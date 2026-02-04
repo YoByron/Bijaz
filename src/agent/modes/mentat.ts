@@ -15,6 +15,10 @@ const MENTAT_TOOLS = [
   'perp_market_list',
   'perp_market_get',
   'perp_positions',
+  'perp_analyze',
+  'position_analysis',
+  'discovery_report',
+  'trade_review',
 
   // Intel tools
   'intel_search',

@@ -17,6 +17,10 @@ const TRADE_TOOLS = [
   'perp_open_orders',
   'perp_cancel_order',
   'perp_positions',
+  'perp_analyze',
+  'position_analysis',
+  'discovery_report',
+  'trade_review',
 
   // Intel tools
   'intel_search',

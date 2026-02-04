@@ -8,6 +8,13 @@ import { listCalibrationSummaries } from '../memory/calibration.js';
 import { listRecentIntel, searchIntel, type StoredIntel } from '../intel/store.js';
 import { upsertAssumption, upsertFragilityCard, upsertMechanism } from '../memory/mentat.js';
 import { HyperliquidClient } from '../execution/hyperliquid/client.js';
+import { runDiscovery } from '../discovery/engine.js';
+import {
+  signalPriceVolRegime,
+  signalHyperliquidFundingOISkew,
+  signalHyperliquidOrderflowImbalance,
+} from '../discovery/signals.js';
+import { listPerpTrades } from '../memory/perp_trades.js';
 
 /** Minimal interface for spending limit enforcement used in tool execution */
 export interface ToolSpendingLimiter {
@@ -163,6 +170,55 @@ export async function executeToolCall(
           const client = new HyperliquidClient(ctx.config);
           const state = await client.getClearinghouseState();
           return { success: true, data: state };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'perp_analyze': {
+        const symbol = String(toolInput.symbol ?? '').trim();
+        const horizon = String(toolInput.horizon ?? '').trim();
+        if (!symbol) {
+          return { success: false, error: 'Missing symbol' };
+        }
+        try {
+          const analysis = await analyzePerpMarket(ctx, symbol, horizon || undefined);
+          return { success: true, data: analysis };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'position_analysis': {
+        const minBufferPct = Number(toolInput.min_liq_buffer_pct ?? 10);
+        try {
+          const analysis = await analyzePositions(ctx, Number.isFinite(minBufferPct) ? minBufferPct : 10);
+          return { success: true, data: analysis };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'discovery_report': {
+        const limit = Math.min(Math.max(Number(toolInput.limit ?? 5), 1), 20);
+        try {
+          const report = await buildDiscoveryReport(ctx.config, limit);
+          return { success: true, data: report };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'trade_review': {
+        const limit = Math.min(Math.max(Number(toolInput.limit ?? 20), 1), 200);
+        const symbol = String(toolInput.symbol ?? '').trim();
+        try {
+          const review = await buildTradeReview(ctx, symbol || undefined, limit);
+          return { success: true, data: review };
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Unknown error';
           return { success: false, error: message };
@@ -708,6 +764,213 @@ async function loadPerpPositions(
       cross_maintenance_margin_used: toNumber(state.crossMaintenanceMarginUsed),
       withdrawable: toNumber(state.withdrawable),
     },
+  };
+}
+
+function formatSignalSymbol(symbol: string): string {
+  if (!symbol) return symbol;
+  if (symbol.includes('/')) return symbol;
+  return `${symbol}/USDT`;
+}
+
+function biasToScore(bias?: string | null): number {
+  if (!bias) return 0;
+  if (bias === 'up') return 1;
+  if (bias === 'down') return -1;
+  return 0;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+async function analyzePerpMarket(
+  ctx: ToolExecutorContext,
+  symbol: string,
+  horizon?: string
+): Promise<Record<string, unknown>> {
+  const market = await ctx.marketClient.getMarket(symbol);
+  const baseSymbol = market.symbol ?? market.id;
+  const signalSymbol = formatSignalSymbol(baseSymbol);
+
+  const [priceVol, funding, orderflow] = await Promise.all([
+    signalPriceVolRegime(ctx.config, signalSymbol),
+    signalHyperliquidFundingOISkew(ctx.config, signalSymbol),
+    signalHyperliquidOrderflowImbalance(ctx.config, signalSymbol),
+  ]);
+
+  const signals = [priceVol, funding, orderflow].filter(Boolean) as Array<{
+    kind: string;
+    directionalBias: string;
+    confidence: number;
+    metrics?: Record<string, unknown>;
+  }>;
+
+  const biasScore = signals.reduce(
+    (acc, s) => acc + biasToScore(s.directionalBias) * (s.confidence ?? 0),
+    0
+  );
+  const avgConfidence = signals.length
+    ? signals.reduce((acc, s) => acc + (s.confidence ?? 0), 0) / signals.length
+    : 0;
+  const probUp =
+    signals.length === 0 ? 0.5 : clamp(0.5 + biasScore * 0.15, 0.2, 0.8);
+  const direction =
+    probUp > 0.55 ? 'up' : probUp < 0.45 ? 'down' : 'neutral';
+
+  const risks: string[] = [];
+  if (signals.length === 0) {
+    risks.push('No signal data available for this symbol.');
+  }
+  if (avgConfidence < 0.25) {
+    risks.push('Low signal confidence; consider smaller sizing.');
+  }
+  if (!market.markPrice) {
+    risks.push('Missing mark price; verify market data.');
+  }
+
+  return {
+    symbol: baseSymbol,
+    horizon: horizon ?? 'hours',
+    mark_price: market.markPrice ?? null,
+    max_leverage: market.metadata?.maxLeverage ?? null,
+    direction,
+    prob_up: Number(probUp.toFixed(2)),
+    confidence: Number(avgConfidence.toFixed(2)),
+    signals: signals.map((s) => ({
+      kind: s.kind,
+      bias: s.directionalBias,
+      confidence: s.confidence,
+      metrics: s.metrics ?? null,
+    })),
+    risks,
+  };
+}
+
+async function analyzePositions(
+  ctx: ToolExecutorContext,
+  minLiqBufferPct: number
+): Promise<Record<string, unknown>> {
+  const data = await loadPerpPositions(ctx);
+  const positions = data.positions ?? [];
+  const enriched = await Promise.all(
+    positions.map(async (pos) => {
+      const symbol = pos.symbol;
+      let markPrice: number | null = null;
+      try {
+        const market = await ctx.marketClient.getMarket(symbol);
+        markPrice = market.markPrice ?? null;
+      } catch {
+        markPrice = null;
+      }
+      const liq = pos.liquidation_price ?? null;
+      const side = pos.side ?? 'long';
+      let bufferPct: number | null = null;
+      if (markPrice != null && liq != null) {
+        const distance = side === 'long' ? markPrice - liq : liq - markPrice;
+        bufferPct = markPrice > 0 ? (distance / markPrice) * 100 : null;
+      }
+      const notional =
+        pos.position_value ??
+        (markPrice != null ? Math.abs(pos.size) * markPrice : null);
+      return {
+        ...pos,
+        mark_price: markPrice,
+        notional,
+        liq_buffer_pct: bufferPct,
+        liq_risk: bufferPct != null && bufferPct < minLiqBufferPct,
+      };
+    })
+  );
+
+  const totalNotional = enriched.reduce((sum, p) => sum + (p.notional ?? 0), 0);
+  const concentration = enriched
+    .map((p) => ({
+      symbol: p.symbol,
+      share: totalNotional > 0 ? (p.notional ?? 0) / totalNotional : 0,
+    }))
+    .sort((a, b) => b.share - a.share);
+
+  const warnings = enriched
+    .filter((p) => p.liq_risk)
+    .map((p) => `${p.symbol}: liquidation buffer ${p.liq_buffer_pct?.toFixed(1)}%`);
+
+  return {
+    summary: {
+      total_positions: enriched.length,
+      total_notional: totalNotional,
+      max_concentration: concentration[0]?.share ?? 0,
+      min_liq_buffer_pct: minLiqBufferPct,
+    },
+    concentration,
+    warnings,
+    positions: enriched,
+  };
+}
+
+async function buildDiscoveryReport(
+  config: ThufirConfig,
+  limit: number
+): Promise<Record<string, unknown>> {
+  const result = await runDiscovery(config);
+  const expressions = result.expressions.slice(0, limit);
+  return {
+    clusters: result.clusters.map((cluster) => ({
+      symbol: cluster.symbol,
+      bias: cluster.directionalBias,
+      confidence: cluster.confidence,
+      time_horizon: cluster.timeHorizon,
+      signals: cluster.signals.map((s) => s.kind),
+    })),
+    hypotheses: result.hypotheses.slice(0, limit),
+    expressions,
+  };
+}
+
+async function buildTradeReview(
+  ctx: ToolExecutorContext,
+  symbol?: string,
+  limit = 20
+): Promise<Record<string, unknown>> {
+  const trades = listPerpTrades({ symbol, limit });
+  const reviewed = await Promise.all(
+    trades.map(async (trade) => {
+      let markPrice: number | null = null;
+      try {
+        const market = await ctx.marketClient.getMarket(trade.symbol);
+        markPrice = market.markPrice ?? null;
+      } catch {
+        markPrice = null;
+      }
+      const entry = trade.price ?? null;
+      let unrealizedPnl: number | null = null;
+      if (entry != null && markPrice != null) {
+        const delta = trade.side === 'buy' ? markPrice - entry : entry - markPrice;
+        unrealizedPnl = delta * trade.size;
+      }
+      return {
+        id: trade.id,
+        created_at: trade.createdAt,
+        symbol: trade.symbol,
+        side: trade.side,
+        size: trade.size,
+        entry_price: entry,
+        mark_price: markPrice,
+        leverage: trade.leverage ?? null,
+        order_type: trade.orderType ?? null,
+        status: trade.status ?? null,
+        unrealized_pnl: unrealizedPnl,
+      };
+    })
+  );
+
+  const totalPnl = reviewed.reduce((sum, t) => sum + (t.unrealized_pnl ?? 0), 0);
+
+  return {
+    count: reviewed.length,
+    total_unrealized_pnl: totalPnl,
+    trades: reviewed,
+    note: 'Unrealized PnL uses current mark price; realized PnL not tracked yet.',
   };
 }
 
