@@ -160,6 +160,56 @@ export const discoveryRunTool: ToolDefinition = {
   },
 };
 
+export const perpAnalyzeTool: ToolDefinition = {
+  name: 'perp_analyze',
+  description: 'Analyze a perp market and return directional probabilities, key risks, and signals.',
+  category: 'intel',
+  schema: z.object({
+    symbol: z.string(),
+    horizon: z.string().optional(),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('perp_analyze', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+};
+
+export const positionAnalysisTool: ToolDefinition = {
+  name: 'position_analysis',
+  description: 'Analyze current perp positions for exposure, leverage, and liquidation risk.',
+  category: 'intel',
+  schema: z.object({
+    min_liq_buffer_pct: z.number().optional(),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('position_analysis', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+};
+
+export const discoveryReportTool: ToolDefinition = {
+  name: 'discovery_report',
+  description: 'Summarize discovery signals, hypotheses, and trade expressions.',
+  category: 'intel',
+  schema: z.object({
+    limit: z.number().optional(),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('discovery_report', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+};
+
+export const tradeReviewTool: ToolDefinition = {
+  name: 'trade_review',
+  description: 'Review recent perp trades and summarize execution quality.',
+  category: 'intel',
+  schema: z.object({
+    symbol: z.string().optional(),
+    limit: z.number().optional(),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('trade_review', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+};
+
 export const discoveryTools: ToolDefinition[] = [
   perpMarketListTool,
   perpMarketGetTool,
@@ -167,6 +217,10 @@ export const discoveryTools: ToolDefinition[] = [
   perpOpenOrdersTool,
   perpCancelOrderTool,
   perpPositionsTool,
+  perpAnalyzeTool,
+  positionAnalysisTool,
+  discoveryReportTool,
+  tradeReviewTool,
   signalPriceVolRegimeTool,
   signalCrossAssetDivergenceTool,
   signalHyperliquidFundingOISkewTool,

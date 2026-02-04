@@ -14,6 +14,10 @@ const CHAT_TOOLS = [
   // Perp market tools (read-only)
   'perp_market_list',
   'perp_market_get',
+  'perp_analyze',
+  'position_analysis',
+  'discovery_report',
+  'trade_review',
 
   // Intel tools
   'intel_search',

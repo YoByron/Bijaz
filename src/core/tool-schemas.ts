@@ -465,6 +465,55 @@ export const THUFIR_TOOLS: Tool[] = [
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
+    name: 'perp_analyze',
+    description: 'Analyze a perp market and return directional probabilities, key risks, and signals.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Perp symbol (e.g., BTC, ETH)' },
+        horizon: { type: 'string', description: 'Time horizon (e.g., "hours", "days", "weeks")' },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'position_analysis',
+    description: 'Analyze current perp positions for exposure, leverage, and liquidation risk.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        min_liq_buffer_pct: {
+          type: 'number',
+          description: 'Warn if liquidation buffer is below this percent (default: 10)',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'discovery_report',
+    description: 'Summarize discovery signals, hypotheses, and trade expressions.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Maximum expressions to include (default: 5)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'trade_review',
+    description: 'Review recent perp trades and summarize execution quality.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Optional symbol filter (e.g., BTC)' },
+        limit: { type: 'number', description: 'Number of trades to include (default: 20)' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'signal_price_vol_regime',
     description: 'Compute price/vol regime signals for a symbol.',
     input_schema: {

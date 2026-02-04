@@ -8,6 +8,10 @@
 - `perp_cancel_order`: cancel order by id
 - `perp_positions`: list open positions
 - `get_portfolio`: combined balances + perp positions
+- `perp_analyze`: market analysis with directional probability + risks
+- `position_analysis`: exposure + liquidation risk report
+- `discovery_report`: summarize signals/hypotheses/expressions
+- `trade_review`: recent trade recap with mark-to-market
 
 ## Risk Guardrails
 - Max notional per market
