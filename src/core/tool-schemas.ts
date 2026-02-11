@@ -2,53 +2,6 @@ import type { Tool } from '@anthropic-ai/sdk/resources/messages';
 
 export const THUFIR_TOOLS: Tool[] = [
   {
-    name: 'market_search',
-    description:
-      'Search for prediction markets on Augur Turbo by query. Use when the user asks about a topic and you want relevant markets.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        query: {
-          type: 'string',
-          description: 'Search query (e.g., "Fed rates", "Bitcoin price")',
-        },
-        limit: {
-          type: 'number',
-          description: 'Maximum number of results (default: 5, max: 20)',
-        },
-      },
-      required: ['query'],
-    },
-  },
-  {
-    name: 'market_get',
-    description: 'Get detailed information about a specific prediction market by ID.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        market_id: {
-          type: 'string',
-          description: 'Augur market ID',
-        },
-      },
-      required: ['market_id'],
-    },
-  },
-  {
-    name: 'market_categories',
-    description: 'List market categories with counts. Useful for browsing and filtering.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        limit: {
-          type: 'number',
-          description: 'Maximum number of categories (default: 20)',
-        },
-      },
-      required: [],
-    },
-  },
-  {
     name: 'intel_search',
     description:
       'Search the intel/news database for recent information about a topic.',
@@ -89,13 +42,13 @@ export const THUFIR_TOOLS: Tool[] = [
   {
     name: 'calibration_stats',
     description:
-      "Get the user's prediction calibration stats (accuracy, Brier score, track record).",
+      "Get the user's historical trade calibration stats (accuracy, track record).",
     input_schema: {
       type: 'object',
       properties: {
         domain: {
           type: 'string',
-          description: 'Filter by domain (e.g., "politics", "crypto")',
+          description: 'Filter by domain (e.g., "macro", "crypto")',
         },
       },
       required: [],
@@ -117,6 +70,59 @@ export const THUFIR_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'system_exec',
+    description:
+      'Execute an allowed local command with explicit arguments. Controlled by agent.systemTools config.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        command: {
+          type: 'string',
+          description: 'Command name (must be in allowlist, e.g., "node", "pnpm", "qmd")',
+        },
+        args: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Command arguments as a string array',
+        },
+        cwd: {
+          type: 'string',
+          description: 'Optional working directory',
+        },
+      },
+      required: ['command'],
+    },
+  },
+  {
+    name: 'system_install',
+    description:
+      'Install packages with an allowed package manager. Controlled by agent.systemTools config.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        manager: {
+          type: 'string',
+          enum: ['pnpm', 'npm', 'bun'],
+          description: 'Package manager to use',
+        },
+        packages: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Package specs to install',
+        },
+        global: {
+          type: 'boolean',
+          description: 'Whether to install globally (must be allowed in config)',
+        },
+        cwd: {
+          type: 'string',
+          description: 'Optional working directory',
+        },
+      },
+      required: ['manager', 'packages'],
+    },
+  },
+  {
     name: 'get_wallet_info',
     description:
       'Get wallet address, chain, and token for funding. Use when asking where to deposit funds.',
@@ -135,7 +141,7 @@ export const THUFIR_TOOLS: Tool[] = [
       properties: {
         query: {
           type: 'string',
-          description: 'Search query for Twitter (e.g., "Augur", "Bitcoin price")',
+          description: 'Search query for Twitter (e.g., "Bitcoin price")',
         },
         limit: {
           type: 'number',
@@ -148,7 +154,7 @@ export const THUFIR_TOOLS: Tool[] = [
   {
     name: 'get_portfolio',
     description:
-      'Get current portfolio: positions, balances, and P&L. Use before betting to understand available capital and exposure.',
+      'Get current portfolio: positions, balances, P&L, and (if configured) perp positions. Use before trading to understand available capital and exposure.',
     input_schema: {
       type: 'object',
       properties: {},
@@ -156,76 +162,23 @@ export const THUFIR_TOOLS: Tool[] = [
     },
   },
   {
-    name: 'get_predictions',
+    name: 'get_positions',
     description:
-      'Get past predictions and their outcomes. Use to review betting history, learn from mistakes, and improve calibration.',
+      'Get current Hyperliquid positions and account summary.',
     input_schema: {
       type: 'object',
-      properties: {
-        limit: {
-          type: 'number',
-          description: 'Maximum predictions to return (default: 20)',
-        },
-        status: {
-          type: 'string',
-          enum: ['all', 'pending', 'resolved', 'won', 'lost'],
-          description: 'Filter by status (default: all)',
-        },
-      },
+      properties: {},
       required: [],
     },
   },
   {
     name: 'get_open_orders',
     description:
-      'Get currently open orders. For Augur AMM trades this will typically be empty.',
+      'Get currently open orders.',
     input_schema: {
       type: 'object',
       properties: {},
       required: [],
-    },
-  },
-  {
-    name: 'get_order_book',
-    description:
-      'Get indicative price snapshot for an Augur market (AMM markets do not have a traditional order book).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        market_id: {
-          type: 'string',
-          description: 'The Augur market ID',
-        },
-        depth: {
-          type: 'number',
-          description: 'Number of price levels to return (default: 5)',
-        },
-      },
-      required: ['market_id'],
-    },
-  },
-  {
-    name: 'price_history',
-    description:
-      'Get price snapshots for an Augur market. Augur Turbo does not expose full order-book history.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        market_id: {
-          type: 'string',
-          description: 'The Augur market ID',
-        },
-        interval: {
-          type: 'string',
-          enum: ['1h', '4h', '1d', '1w'],
-          description: 'Time interval between data points (default: 1d)',
-        },
-        limit: {
-          type: 'number',
-          description: 'Number of data points (default: 30)',
-        },
-      },
-      required: ['market_id'],
     },
   },
   {
@@ -264,34 +217,6 @@ export const THUFIR_TOOLS: Tool[] = [
         },
       },
       required: ['url'],
-    },
-  },
-  {
-    name: 'place_bet',
-    description:
-      'Place a bet on a prediction market. Use after researching a market to execute a trade. System spending/exposure limits apply automatically.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        market_id: {
-          type: 'string',
-          description: 'The Augur market ID to bet on',
-        },
-        outcome: {
-          type: 'string',
-          enum: ['YES', 'NO'],
-          description: 'The outcome to bet on (YES or NO)',
-        },
-        amount: {
-          type: 'number',
-          description: 'Amount in USD to bet',
-        },
-        reasoning: {
-          type: 'string',
-          description: 'Your reasoning for this bet (stored for calibration tracking)',
-        },
-      },
-      required: ['market_id', 'outcome', 'amount'],
     },
   },
   {
@@ -372,7 +297,7 @@ export const THUFIR_TOOLS: Tool[] = [
   {
     name: 'mentat_store_assumption',
     description:
-      'Store an assumption for the mentat fragility analysis system. Assumptions are beliefs that underpin predictions and can be stress-tested.',
+      'Store an assumption for the mentat fragility analysis system. Assumptions are beliefs that underpin positions and can be stress-tested.',
     input_schema: {
       type: 'object',
       properties: {
@@ -419,7 +344,7 @@ export const THUFIR_TOOLS: Tool[] = [
   {
     name: 'mentat_store_fragility',
     description:
-      'Store a fragility card identifying tail-risk exposure. Fragility cards track structural vulnerabilities, not event predictions.',
+      'Store a fragility card identifying tail-risk exposure. Fragility cards track structural vulnerabilities, not event forecasts.',
     input_schema: {
       type: 'object',
       properties: {
@@ -524,6 +449,193 @@ export const THUFIR_TOOLS: Tool[] = [
         },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'perp_market_list',
+    description: 'List perp markets for the configured exchange.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'number',
+          description: 'Maximum number of markets (default: 20)',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'perp_market_get',
+    description: 'Get details for a perp market by symbol.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: {
+          type: 'string',
+          description: 'Perp symbol (e.g., BTC)',
+        },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'perp_place_order',
+    description: 'Place a perp order on the configured exchange.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Perp symbol' },
+        side: { type: 'string', enum: ['buy', 'sell'], description: 'Order side' },
+        size: { type: 'number', description: 'Order size' },
+        order_type: { type: 'string', enum: ['market', 'limit'], description: 'Order type' },
+        price: { type: 'number', description: 'Limit price (required for limit orders)' },
+        leverage: { type: 'number', description: 'Leverage to apply' },
+        reduce_only: { type: 'boolean', description: 'Reduce-only order' },
+      },
+      required: ['symbol', 'side', 'size'],
+    },
+  },
+  {
+    name: 'perp_open_orders',
+    description: 'List open perp orders for the configured exchange.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'perp_cancel_order',
+    description: 'Cancel a perp order by id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        order_id: { type: 'string', description: 'Order id to cancel' },
+      },
+      required: ['order_id'],
+    },
+  },
+  {
+    name: 'perp_positions',
+    description: 'Get open perp positions for the configured exchange.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'perp_analyze',
+    description: 'Analyze a perp market and return directional probabilities, key risks, and signals.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Perp symbol (e.g., BTC, ETH)' },
+        horizon: { type: 'string', description: 'Time horizon (e.g., "hours", "days", "weeks")' },
+        probability_mode: {
+          type: 'string',
+          enum: ['conservative', 'balanced', 'aggressive'],
+          description: 'Probability calibration mode (default: balanced)',
+        },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'position_analysis',
+    description: 'Analyze current perp positions for exposure, leverage, and liquidation risk.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        min_liq_buffer_pct: {
+          type: 'number',
+          description: 'Warn if liquidation buffer is below this percent (default: 12)',
+        },
+        max_concentration_pct: {
+          type: 'number',
+          description: 'Warn if a single symbol exceeds this share of notional (default: 40)',
+        },
+        leverage_warning: {
+          type: 'number',
+          description: 'Warn if leverage exceeds this value (default: 5)',
+        },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'discovery_report',
+    description: 'Summarize discovery signals, hypotheses, and trade expressions.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Maximum expressions to include (default: 5)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'trade_review',
+    description: 'Review recent perp trades and summarize execution quality.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Optional symbol filter (e.g., BTC)' },
+        limit: { type: 'number', description: 'Number of trades to include (default: 20)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'signal_price_vol_regime',
+    description: 'Compute price/vol regime signals for a symbol.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Symbol in exchange format (e.g., BTC/USDT)' },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'signal_cross_asset_divergence',
+    description: 'Compute cross-asset divergence signals for a set of symbols.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbols: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Symbols in exchange format (e.g., BTC/USDT)',
+        },
+      },
+      required: ['symbols'],
+    },
+  },
+  {
+    name: 'signal_hyperliquid_funding_oi_skew',
+    description: 'Compute funding/open-interest skew signal from Hyperliquid.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Symbol in exchange format (e.g., BTC/USDT)' },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'signal_hyperliquid_orderflow_imbalance',
+    description: 'Compute orderflow imbalance signal from Hyperliquid.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Symbol in exchange format (e.g., BTC/USDT)' },
+      },
+      required: ['symbol'],
+    },
+  },
+  {
+    name: 'discovery_run',
+    description: 'Run the autonomous discovery loop and return clusters, hypotheses, and expressions.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Maximum number of clusters to return' },
+      },
+      required: [],
     },
   },
 ];

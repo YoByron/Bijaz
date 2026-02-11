@@ -2,10 +2,12 @@ import { z } from 'zod';
 
 import type { LlmClient } from './llm.js';
 import type { Logger } from './logger.js';
-import type { Market } from '../execution/augur/markets.js';
+import type { Market } from '../execution/markets.js';
 import { listCalibrationSummaries, type CalibrationSummary } from '../memory/calibration.js';
 import { listPredictions } from '../memory/predictions.js';
 import { withExecutionContextIfMissing } from './llm_infra.js';
+import { computeFingerprint } from './execution_mode.js';
+import { findReusableArtifact, storeDecisionArtifact } from '../memory/decision_artifacts.js';
 
 const DecisionSchema = z.object({
   action: z.enum(['buy', 'sell', 'hold']),
@@ -16,6 +18,21 @@ const DecisionSchema = z.object({
 });
 
 export type Decision = z.infer<typeof DecisionSchema>;
+
+function buildDecisionFingerprint(market: Market, remainingDaily: number): string {
+  return computeFingerprint({
+    market: {
+      id: market.id,
+      question: market.question ?? null,
+      prices: market.prices ?? null,
+      volume: market.volume ?? null,
+      liquidity: market.liquidity ?? null,
+      category: market.category ?? null,
+      resolved: market.resolved ?? null,
+    },
+    remainingDaily: Math.round(remainingDaily * 100) / 100,
+  });
+}
 
 function extractJsonCandidate(text: string): string {
   const fenced = text.match(/```json\s*([\s\S]*?)```/i);
@@ -202,7 +219,7 @@ function suggestPositionSize(
   return { suggested: Math.round(suggested * 100) / 100, reasoning };
 }
 
-export const EXECUTOR_PROMPT = `You are Thufir, an autonomous prediction market trader.
+export const EXECUTOR_PROMPT = `You are Thufir, an autonomous perp market trader.
 
 Your key principles:
 1. Be CALIBRATED - adjust confidence based on your historical accuracy
@@ -299,9 +316,22 @@ export async function decideTrade(
   remainingDaily: number,
   logger?: Logger
 ): Promise<Decision> {
-  return withExecutionContextIfMissing(
+  return withExecutionContextIfMissing<Decision>(
     { mode: 'FULL_AGENT', critical: true, reason: 'trade_decision', source: 'decision' },
     async () => {
+      const fingerprint = buildDecisionFingerprint(market, remainingDaily);
+      const cached = findReusableArtifact({
+        kind: 'trade_decision',
+        marketId: market.id,
+        fingerprint,
+        maxAgeMs: 6 * 60 * 60 * 1000,
+      });
+      const cachedPayload = cached?.payload as { decision?: Decision } | null | undefined;
+      const cachedDecision = cachedPayload?.decision;
+      if (cachedDecision) {
+        return cachedDecision;
+      }
+
       const { plannerPrompt, positionSuggestion } = buildDecisionPrompts(
         market,
         remainingDaily
@@ -398,6 +428,28 @@ ${responseContent}`.trim();
           };
         }
       }
+
+      const expires = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+      storeDecisionArtifact({
+        source: 'decision',
+        kind: 'trade_decision',
+        marketId: market.id,
+        fingerprint,
+        outcome: decision.outcome ?? null,
+        expiresAt: expires,
+        payload: {
+          decision,
+          marketSnapshot: {
+            id: market.id,
+            question: market.question ?? null,
+            prices: market.prices ?? null,
+            volume: market.volume ?? null,
+            category: market.category ?? null,
+          },
+          remainingDaily,
+          generatedAt: new Date().toISOString(),
+        },
+      });
 
       return decision;
     }

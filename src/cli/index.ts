@@ -3,32 +3,23 @@ import 'dotenv/config';
 /**
  * Thufir CLI
  *
- * Command-line interface for Thufir prediction market companion.
+ * Command-line interface for Thufir autonomous market discovery companion.
  */
 
 import { Command } from 'commander';
 import { VERSION } from '../index.js';
 import { loadConfig } from '../core/config.js';
-import {
-  createPrediction,
-  getPrediction,
-  listPredictions,
-} from '../memory/predictions.js';
-import { AugurMarketClient } from '../execution/augur/markets.js';
+import { createMarketClient } from '../execution/market-client.js';
 import { addWatchlist, listWatchlist } from '../memory/watchlist.js';
 import { runIntelPipeline } from '../intel/pipeline.js';
 import { listRecentIntel } from '../intel/store.js';
+import { listProactiveQueryStats } from '../memory/proactive_queries.js';
 import { rankIntelAlerts } from '../intel/alerts.js';
 import { listIntelSources, isSourceAllowedForRoaming } from '../intel/sources_registry.js';
 import { formatProactiveSummary, runProactiveSearch } from '../core/proactive_search.js';
-import {
-  listCalibrationSummaries,
-  listResolvedPredictions,
-} from '../memory/calibration.js';
-import { listOpenPositions } from '../memory/predictions.js';
+import { listCalibrationSummaries } from '../memory/calibration.js';
 import { listOpenPositionsFromTrades } from '../memory/trades.js';
 import { adjustCashBalance, getCashBalance, setCashBalance } from '../memory/portfolio.js';
-import { resolveOutcomes } from '../core/resolver.js';
 import { getUserContext, updateUserContext } from '../memory/user.js';
 import { encryptPrivateKey, saveKeystore } from '../execution/wallet/keystore.js';
 import { loadWallet } from '../execution/wallet/manager.js';
@@ -43,8 +34,6 @@ import yaml from 'yaml';
 import { openDatabase } from '../memory/db.js';
 import { pruneChatMessages } from '../memory/chat.js';
 import { SessionStore } from '../memory/session_store.js';
-import { checkExposureLimits } from '../core/exposure.js';
-import { explainPrediction } from '../core/explain.js';
 import { executeToolCall } from '../core/tool-executor.js';
 import { getEvaluationSummary } from '../core/evaluation.js';
 import { runOrchestrator } from '../agent/orchestrator/orchestrator.js';
@@ -60,21 +49,15 @@ import type { ThufirConfig } from '../core/config.js';
 
 /**
  * Create the appropriate executor based on config execution mode.
- * For live mode, requires password (from env or passed in).
+ * The CLI agent command currently supports paper/webhook execution paths.
  */
 async function createExecutorForConfig(
   config: ThufirConfig,
-  password?: string
+  _password?: string
 ): Promise<ExecutionAdapter> {
   if (config.execution.mode === 'live') {
-    const { AugurLiveExecutor } = await import('../execution/modes/augur-live.js');
-    const pwd = password ?? process.env.THUFIR_WALLET_PASSWORD;
-    if (!pwd) {
-      throw new Error(
-        'Live execution mode requires THUFIR_WALLET_PASSWORD environment variable or --password option'
-      );
-    }
-    return new AugurLiveExecutor({ config, password: pwd });
+    const { UnsupportedLiveExecutor } = await import('../execution/modes/unsupported-live.js');
+    return new UnsupportedLiveExecutor();
   }
 
   if (config.execution.mode === 'webhook' && config.execution.webhookUrl) {
@@ -220,6 +203,8 @@ const ENV_KEYS = [
   'WHATSAPP_PHONE_NUMBER_ID',
   'THUFIR_WALLET_PASSWORD',
   'THUFIR_KEYSTORE_PATH',
+  'HYPERLIQUID_ACCOUNT_ADDRESS',
+  'HYPERLIQUID_PRIVATE_KEY',
 ];
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -332,7 +317,7 @@ async function runEnvChecks(values: Record<string, string>): Promise<void> {
   if (env.SERPAPI_KEY) {
     await tryCheck('SerpAPI', () =>
       fetchWithTimeout(
-        `https://serpapi.com/search.json?engine=google_news&q=augur%20prediction%20market&api_key=${env.SERPAPI_KEY}`
+        `https://serpapi.com/search.json?engine=google_news&q=perp%20market&api_key=${env.SERPAPI_KEY}`
       )
     );
   } else {
@@ -342,7 +327,7 @@ async function runEnvChecks(values: Record<string, string>): Promise<void> {
   if (env.TWITTER_BEARER) {
     await tryCheck('X/Twitter', () =>
       fetchWithTimeout(
-        'https://api.twitter.com/2/tweets/search/recent?query=augur%20prediction%20market&max_results=10',
+        'https://api.twitter.com/2/tweets/search/recent?query=perp%20market&max_results=10',
         {
           headers: { Authorization: `Bearer ${env.TWITTER_BEARER}` },
         }
@@ -373,6 +358,26 @@ async function runEnvChecks(values: Record<string, string>): Promise<void> {
     results.push({ name: 'WhatsApp', ok: false, detail: 'missing WhatsApp tokens' });
   }
 
+  await tryCheck('Hyperliquid API', () =>
+    fetchWithTimeout('https://api.hyperliquid.xyz/info', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'meta' }),
+    })
+  );
+
+  const hasHyperPrivateKey = Boolean(env.HYPERLIQUID_PRIVATE_KEY?.trim());
+  const hasHyperAccountAddress = Boolean(env.HYPERLIQUID_ACCOUNT_ADDRESS?.trim());
+  results.push({
+    name: 'Hyperliquid auth',
+    ok: hasHyperPrivateKey || hasHyperAccountAddress,
+    detail: hasHyperPrivateKey
+      ? 'HYPERLIQUID_PRIVATE_KEY set'
+      : hasHyperAccountAddress
+        ? 'HYPERLIQUID_ACCOUNT_ADDRESS set (read-only)'
+        : 'missing HYPERLIQUID_PRIVATE_KEY',
+  });
+
   if (env.THUFIR_KEYSTORE_PATH) {
     const exists = existsSync(env.THUFIR_KEYSTORE_PATH);
     results.push({
@@ -397,10 +402,19 @@ const config = loadConfig();
 if (config.memory?.dbPath) {
   process.env.THUFIR_DB_PATH = config.memory.dbPath;
 }
+const marketClient = createMarketClient(config);
+
+function requireMarketClient(): typeof marketClient | null {
+  if (!marketClient.isAvailable()) {
+    console.log('Market client is not configured. Market commands are unavailable.');
+    return null;
+  }
+  return marketClient;
+}
 
 program
   .name('thufir')
-  .description('Prediction Market AI Companion')
+  .description('Autonomous Market Discovery Companion')
   .version(VERSION);
 
 // ============================================================================
@@ -443,6 +457,96 @@ env
     const envPath = join(process.cwd(), '.env');
     const values = existsSync(envPath) ? parseEnvFile(readFileSync(envPath, 'utf8')) : {};
     await runEnvChecks(values);
+  });
+
+env
+  .command('verify-live')
+  .description('Run Hyperliquid live smoke checks (read-only)')
+  .option('--symbol <symbol>', 'Perp symbol for mid-price check', 'BTC')
+  .action(async (options: { symbol?: string }) => {
+    const { HyperliquidClient } = await import('../execution/hyperliquid/client.js');
+    const client = new HyperliquidClient(config);
+    const symbol = String(options.symbol ?? 'BTC').trim().toUpperCase();
+    const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+
+    try {
+      const markets = await client.listPerpMarkets();
+      const hasSymbol = markets.some((market) => market.symbol === symbol);
+      checks.push({
+        name: 'Perp markets',
+        ok: markets.length > 0,
+        detail: `loaded ${markets.length} market(s)`,
+      });
+      checks.push({
+        name: `Symbol ${symbol}`,
+        ok: hasSymbol,
+        detail: hasSymbol ? 'found in market metadata' : 'not found in market metadata',
+      });
+    } catch (error) {
+      checks.push({
+        name: 'Perp markets',
+        ok: false,
+        detail: error instanceof Error ? error.message : 'unknown error',
+      });
+    }
+
+    try {
+      const mids = await client.getAllMids();
+      const mid = mids[symbol];
+      checks.push({
+        name: 'Mid prices',
+        ok: Object.keys(mids).length > 0,
+        detail:
+          typeof mid === 'number'
+            ? `${symbol} mid=${mid}`
+            : `${Object.keys(mids).length} symbol(s) loaded`,
+      });
+    } catch (error) {
+      checks.push({
+        name: 'Mid prices',
+        ok: false,
+        detail: error instanceof Error ? error.message : 'unknown error',
+      });
+    }
+
+    const accountAddress = client.getAccountAddress();
+    if (accountAddress) {
+      try {
+        const state = await client.getClearinghouseState();
+        const stateKeys =
+          state && typeof state === 'object'
+            ? Object.keys(state as Record<string, unknown>).length
+            : 0;
+        checks.push({
+          name: 'Account state',
+          ok: true,
+          detail: `loaded for ${accountAddress.slice(0, 10)}... (${stateKeys} field(s))`,
+        });
+      } catch (error) {
+        checks.push({
+          name: 'Account state',
+          ok: false,
+          detail: error instanceof Error ? error.message : 'unknown error',
+        });
+      }
+    } else {
+      checks.push({
+        name: 'Account state',
+        ok: false,
+        detail:
+          'missing HYPERLIQUID_ACCOUNT_ADDRESS/HYPERLIQUID_PRIVATE_KEY (required for authenticated checks)',
+      });
+    }
+
+    console.log('Live Verification (Hyperliquid)');
+    console.log('─'.repeat(40));
+    for (const check of checks) {
+      const status = check.ok ? 'ok' : 'fail';
+      console.log(`${check.name}: ${status} (${check.detail})`);
+    }
+
+    const failed = checks.filter((check) => !check.ok).length;
+    process.exitCode = failed === 0 ? 0 : 1;
   });
 
 // ============================================================================
@@ -620,7 +724,6 @@ walletLimits
 // ============================================================================
 
 const markets = program.command('markets').description('Market data');
-const marketClient = new AugurMarketClient(config);
 
 markets
   .command('list')
@@ -628,9 +731,11 @@ markets
   .option('-c, --category <category>', 'Filter by category')
   .option('-l, --limit <number>', 'Limit results', '20')
   .action(async (options) => {
+    const client = requireMarketClient();
+    if (!client) return;
     console.log('Active Markets');
     console.log('─'.repeat(60));
-    const list = await marketClient.listMarkets(Number(options.limit));
+    const list = await client.listMarkets(Number(options.limit));
     for (const market of list) {
       console.log(`${market.id} | ${market.question}`);
     }
@@ -640,9 +745,11 @@ markets
   .command('show <id>')
   .description('Show market details')
   .action(async (id) => {
+    const client = requireMarketClient();
+    if (!client) return;
     console.log(`Market: ${id}`);
     console.log('─'.repeat(40));
-    const market = await marketClient.getMarket(id);
+    const market = await client.getMarket(id);
     console.log(`Question: ${market.question}`);
     console.log(`Outcomes: ${market.outcomes.join(', ')}`);
     console.log(`Prices: ${JSON.stringify(market.prices)}`);
@@ -691,261 +798,6 @@ markets
     }
   });
 
-markets
-  .command('tokens <id>')
-  .description('Show share tokens for an Augur market')
-  .action(async (id) => {
-    const marketClient = new AugurMarketClient(config);
-
-    console.log(`Fetching token IDs for: ${id}`);
-    console.log('─'.repeat(50));
-
-    try {
-      const market = await marketClient.getMarket(id);
-      console.log(`Market ID: ${market.id}`);
-      console.log(`Platform: ${market.platform}`);
-      if (market.augur) {
-        console.log(`Factory: ${market.augur.marketFactory}`);
-        console.log(`Index: ${market.augur.marketIndex}`);
-        console.log(`Type: ${market.augur.type}`);
-        console.log(`Share tokens: ${market.augur.shareTokens.length}`);
-        market.augur.shareTokens.forEach((token, idx) => {
-          console.log(`  ${idx}: ${token}`);
-        });
-      }
-      console.log(`\nTokens:`);
-      console.log(`  Outcomes: ${market.outcomes.join(', ')}`);
-    } catch (error) {
-      console.error(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      console.log('\nNote: The ID should be the Augur market id from the subgraph.');
-      console.log('You can find this in the market URL or by using `thufir markets search`.');
-    }
-  });
-
-markets
-  .command('augur-status')
-  .description('Test Augur subgraph connectivity')
-  .action(async () => {
-    const marketClient = new AugurMarketClient(config);
-
-    console.log('Testing Augur subgraph connectivity...');
-    console.log('─'.repeat(40));
-    console.log(`Subgraph: ${config.augur?.subgraph}`);
-
-    try {
-      const markets = await marketClient.listMarkets(3);
-      console.log(`✓ Connected - ${markets.length} markets returned`);
-      for (const sample of markets) {
-        console.log(`\nSample market: ${sample.question}`);
-        console.log(`  ID: ${sample.id}`);
-        console.log(`  Platform: ${sample.platform}`);
-      }
-    } catch (error) {
-      console.error(`✗ Connection failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  });
-
-// ============================================================================
-// Trade Commands
-// ============================================================================
-
-const trade = program.command('trade').description('Execute trades');
-
-trade
-  .command('buy <market> <outcome>')
-  .description('Buy shares in a market')
-  .requiredOption('-a, --amount <usd>', 'Amount in USD')
-  .option('-p, --price <price>', 'Limit price (0-1)')
-  .option('--dry-run', 'Simulate without executing')
-  .action(async (market, outcome, options) => {
-    const { DbSpendingLimitEnforcer } = await import('../execution/wallet/limits_db.js');
-
-    const amount = Number(options.amount);
-    if (Number.isNaN(amount) || amount <= 0) {
-      console.log('Amount must be a positive number.');
-      return;
-    }
-    const price = options.price ? Number(options.price) : undefined;
-    if (price !== undefined && (Number.isNaN(price) || price <= 0 || price > 1)) {
-      console.log('Price must be a number between 0 and 1.');
-      return;
-    }
-
-    const normalizedOutcome = String(outcome).toUpperCase();
-    if (!['YES', 'NO'].includes(normalizedOutcome)) {
-      console.log('Outcome must be YES or NO.');
-      return;
-    }
-
-    const marketClient = new AugurMarketClient(config);
-    const executor = await createExecutorForConfig(config);
-    const limiter = new DbSpendingLimitEnforcer({
-      daily: config.wallet?.limits?.daily ?? 100,
-      perTrade: config.wallet?.limits?.perTrade ?? 25,
-      confirmationThreshold: config.wallet?.limits?.confirmationThreshold ?? 10,
-    });
-
-    try {
-      const marketData = await marketClient.getMarket(market);
-      if (price !== undefined) {
-        marketData.prices = { ...marketData.prices, [normalizedOutcome]: price };
-      }
-
-      const exposureCheck = checkExposureLimits({
-        config,
-        market: marketData,
-        outcome: normalizedOutcome as 'YES' | 'NO',
-        amount,
-        side: 'buy',
-      });
-      if (!exposureCheck.allowed) {
-        console.log(`Trade blocked: ${exposureCheck.reason ?? 'exposure limit exceeded'}`);
-        return;
-      }
-
-      const limitCheck = await limiter.checkAndReserve(amount);
-      if (!limitCheck.allowed) {
-        console.log(`Trade blocked: ${limitCheck.reason ?? 'limit exceeded'}`);
-        return;
-      }
-
-      if (options.dryRun) {
-        limiter.release(amount);
-        const currentPrice = marketData.prices?.[normalizedOutcome] ?? marketData.prices?.['0'] ?? 0.5;
-        const estimatedShares = amount / currentPrice;
-        console.log('─'.repeat(50));
-        console.log('DRY RUN - Trade Preview');
-        console.log('─'.repeat(50));
-        console.log(`Market:   ${marketData.question}`);
-        console.log(`Action:   BUY ${normalizedOutcome}`);
-        console.log(`Amount:   $${amount.toFixed(2)}`);
-        console.log(`Price:    ${(currentPrice * 100).toFixed(2)}¢`);
-        console.log(`Shares:   ~${estimatedShares.toFixed(2)} (estimated)`);
-        console.log(`Payout:   $${estimatedShares.toFixed(2)} if ${normalizedOutcome} wins`);
-        console.log('─'.repeat(50));
-        console.log('✓ Exposure check passed');
-        console.log('✓ Spending limit check passed');
-        console.log('─'.repeat(50));
-        console.log('Run without --dry-run to execute.');
-        return;
-      }
-
-      const result = await executor.execute(marketData, {
-        action: 'buy',
-        outcome: normalizedOutcome as 'YES' | 'NO',
-        amount,
-        confidence: 'medium',
-        reasoning: 'Manual CLI trade',
-      });
-
-      if (result.executed) {
-        limiter.confirm(amount);
-      } else {
-        limiter.release(amount);
-      }
-      console.log(result.message);
-    } catch (error) {
-      console.error('Trade failed:', error instanceof Error ? error.message : 'Unknown error');
-    }
-  });
-
-trade
-  .command('sell <market> <outcome>')
-  .description('Sell shares in a market')
-  .requiredOption('-a, --amount <usd>', 'Amount in USD')
-  .option('-p, --price <price>', 'Limit price (0-1)')
-  .option('--dry-run', 'Simulate without executing')
-  .action(async (market, outcome, options) => {
-    const { DbSpendingLimitEnforcer } = await import('../execution/wallet/limits_db.js');
-
-    const amount = Number(options.amount);
-    if (Number.isNaN(amount) || amount <= 0) {
-      console.log('Amount must be a positive number.');
-      return;
-    }
-    const price = options.price ? Number(options.price) : undefined;
-    if (price !== undefined && (Number.isNaN(price) || price <= 0 || price > 1)) {
-      console.log('Price must be a number between 0 and 1.');
-      return;
-    }
-
-    const normalizedOutcome = String(outcome).toUpperCase();
-    if (!['YES', 'NO'].includes(normalizedOutcome)) {
-      console.log('Outcome must be YES or NO.');
-      return;
-    }
-
-    const marketClient = new AugurMarketClient(config);
-    const executor = await createExecutorForConfig(config);
-    const limiter = new DbSpendingLimitEnforcer({
-      daily: config.wallet?.limits?.daily ?? 100,
-      perTrade: config.wallet?.limits?.perTrade ?? 25,
-      confirmationThreshold: config.wallet?.limits?.confirmationThreshold ?? 10,
-    });
-
-    try {
-      const marketData = await marketClient.getMarket(market);
-      if (price !== undefined) {
-        marketData.prices = { ...marketData.prices, [normalizedOutcome]: price };
-      }
-
-      const exposureCheck = checkExposureLimits({
-        config,
-        market: marketData,
-        outcome: normalizedOutcome as 'YES' | 'NO',
-        amount,
-        side: 'sell',
-      });
-      if (!exposureCheck.allowed) {
-        console.log(`Trade blocked: ${exposureCheck.reason ?? 'exposure limit exceeded'}`);
-        return;
-      }
-
-      const limitCheck = await limiter.checkAndReserve(amount);
-      if (!limitCheck.allowed) {
-        console.log(`Trade blocked: ${limitCheck.reason ?? 'limit exceeded'}`);
-        return;
-      }
-
-      if (options.dryRun) {
-        limiter.release(amount);
-        const currentPrice = marketData.prices?.[normalizedOutcome] ?? marketData.prices?.['0'] ?? 0.5;
-        const estimatedShares = amount / currentPrice;
-        console.log('─'.repeat(50));
-        console.log('DRY RUN - Trade Preview');
-        console.log('─'.repeat(50));
-        console.log(`Market:   ${marketData.question}`);
-        console.log(`Action:   SELL ${normalizedOutcome}`);
-        console.log(`Amount:   $${amount.toFixed(2)}`);
-        console.log(`Price:    ${(currentPrice * 100).toFixed(2)}¢`);
-        console.log(`Shares:   ~${estimatedShares.toFixed(2)} (estimated)`);
-        console.log(`Proceeds: ~$${(estimatedShares * currentPrice).toFixed(2)} (estimated)`);
-        console.log('─'.repeat(50));
-        console.log('✓ Exposure check passed');
-        console.log('✓ Spending limit check passed');
-        console.log('─'.repeat(50));
-        console.log('Run without --dry-run to execute.');
-        return;
-      }
-
-      const result = await executor.execute(marketData, {
-        action: 'sell',
-        outcome: normalizedOutcome as 'YES' | 'NO',
-        amount,
-        confidence: 'medium',
-        reasoning: 'Manual CLI trade',
-      });
-
-      if (result.executed) {
-        limiter.confirm(amount);
-      } else {
-        limiter.release(amount);
-      }
-      console.log(result.message);
-    } catch (error) {
-      console.error('Trade failed:', error instanceof Error ? error.message : 'Unknown error');
-    }
-  });
 
 // ============================================================================
 // Portfolio Commands
@@ -1011,10 +863,10 @@ program
 
     console.log('Portfolio');
     console.log('═'.repeat(60));
-    const canUseClob =
+    const canUseLive =
       config.execution.mode === 'live' && Boolean(process.env.THUFIR_WALLET_PASSWORD);
-    if (canUseClob) {
-      const marketClient = new AugurMarketClient(config);
+    if (canUseLive) {
+      const marketClient = createMarketClient(config);
       const executor = await createExecutorForConfig(config);
       const limiter = new DbSpendingLimitEnforcer({
         daily: config.wallet?.limits?.daily ?? 100,
@@ -1029,51 +881,68 @@ program
       });
       if (toolResult.success) {
         const data = toolResult.data as {
-          positions?: Array<{
-            market_question?: string;
-            outcome?: string;
-            shares?: number | null;
-            avg_price?: number | null;
-            current_price?: number | null;
+          perp_positions?: Array<{
+            symbol?: string;
+            side?: string;
+            size?: number;
+            entry_price?: number | null;
+            position_value?: number | null;
             unrealized_pnl?: number | null;
+            leverage?: number | null;
           }>;
-          summary?: {
-            total_positions?: number;
-            total_value?: number;
-            total_cost?: number;
-            unrealized_pnl?: number;
-            positions_source?: string;
-          };
+          perp_summary?: {
+            account_value?: number | null;
+            total_notional?: number | null;
+            total_margin_used?: number | null;
+            withdrawable?: number | null;
+          } | null;
+          perp_error?: string | null;
         };
-        const positions = data.positions ?? [];
-        if (positions.length === 0) {
+        const perpPositions = data.perp_positions ?? [];
+        if (perpPositions.length === 0) {
           console.log('No open positions.');
           return;
         }
-        for (const position of positions) {
-          const title = position.market_question ?? 'Unknown market';
-          const shares = position.shares != null ? position.shares.toFixed(2) : 'n/a';
-          const avg = position.avg_price != null ? position.avg_price.toFixed(3) : 'n/a';
-          const current = position.current_price != null ? position.current_price.toFixed(3) : 'n/a';
-          const pnl = position.unrealized_pnl != null ? position.unrealized_pnl.toFixed(2) : 'n/a';
-          console.log(`- ${title} [${position.outcome ?? 'YES'}] shares=${shares} avg=${avg} current=${current} pnl=${pnl}`);
-        }
-        const summary = data.summary;
-        if (summary) {
-          const source = summary.positions_source ?? 'clob';
+        if (perpPositions.length > 0) {
+          console.log('Perp Positions');
           console.log('─'.repeat(40));
-          console.log(`Source: ${source}`);
-          console.log(`Total Value: $${(summary.total_value ?? 0).toFixed(2)}`);
-          console.log(`Total Cost: $${(summary.total_cost ?? 0).toFixed(2)}`);
-          console.log(`Unrealized PnL: $${(summary.unrealized_pnl ?? 0).toFixed(2)}`);
+          for (const position of perpPositions) {
+            const symbol = position.symbol ?? 'Unknown';
+            const side = position.side ?? 'n/a';
+            const size = position.size != null ? position.size.toFixed(4) : 'n/a';
+            const entry =
+              position.entry_price != null ? position.entry_price.toFixed(2) : 'n/a';
+            const value =
+              position.position_value != null ? position.position_value.toFixed(2) : 'n/a';
+            const pnl =
+              position.unrealized_pnl != null ? position.unrealized_pnl.toFixed(2) : 'n/a';
+            const leverage =
+              position.leverage != null ? position.leverage.toFixed(2) : 'n/a';
+            console.log(
+              `- ${symbol} ${side} size=${size} entry=${entry} value=${value} pnl=${pnl} lev=${leverage}`
+            );
+          }
+          const perpSummary = data.perp_summary ?? null;
+          if (perpSummary) {
+            console.log('─'.repeat(40));
+            console.log(`Account Value: $${(perpSummary.account_value ?? 0).toFixed(2)}`);
+            console.log(`Total Notional: $${(perpSummary.total_notional ?? 0).toFixed(2)}`);
+            console.log(
+              `Margin Used: $${(perpSummary.total_margin_used ?? 0).toFixed(2)}`
+            );
+            if (perpSummary.withdrawable != null) {
+              console.log(`Withdrawable: $${perpSummary.withdrawable.toFixed(2)}`);
+            }
+          }
+        }
+        if (data.perp_error) {
+          console.log('');
+          console.log(`Perp error: ${data.perp_error}`);
         }
         return;
       }
     }
-    const positions = (() => {
-      const fromTrades = listOpenPositionsFromTrades(200);
-      return fromTrades.length > 0 ? fromTrades : listOpenPositions(200);
-    })();
+    const positions = listOpenPositionsFromTrades(200);
     const cashBalance = getCashBalance();
     if (positions.length === 0) {
       console.log('No open positions.');
@@ -1146,119 +1015,6 @@ program
     console.log(`Total PnL: ${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(2)} (${totalPnlPercent.toFixed(1)}%)`);
     console.log(`Cash Balance: $${cashBalance.toFixed(2)}`);
     console.log(`Total Equity: $${totalEquity.toFixed(2)}`);
-  });
-
-// ============================================================================
-// Prediction Commands
-// ============================================================================
-
-const predictions = program.command('predictions').description('Prediction tracking');
-
-predictions
-  .command('add')
-  .description('Record a new prediction')
-  .requiredOption('--market-id <id>', 'Market ID')
-  .requiredOption('--title <title>', 'Market title')
-  .option('--outcome <YES|NO>', 'Predicted outcome (YES/NO)')
-  .option('--prob <number>', 'Predicted probability (0-1)')
-  .option('--confidence <low|medium|high>', 'Confidence level')
-  .option('--domain <domain>', 'Prediction domain/category')
-  .option('--reasoning <text>', 'Short reasoning summary')
-  .action(async (options) => {
-    if (options.outcome && !['YES', 'NO'].includes(options.outcome)) {
-      console.log('Outcome must be YES or NO.');
-      return;
-    }
-
-    const probability = options.prob ? Number(options.prob) : undefined;
-    if (probability !== undefined && (probability < 0 || probability > 1)) {
-      console.log('Probability must be between 0 and 1.');
-      return;
-    }
-
-    const id = createPrediction({
-      marketId: options.marketId,
-      marketTitle: options.title,
-      predictedOutcome: options.outcome,
-      predictedProbability: probability,
-      confidenceLevel: options.confidence,
-      domain: options.domain,
-      reasoning: options.reasoning,
-    });
-
-    console.log(`Recorded prediction ${id}`);
-  });
-
-predictions
-  .command('list')
-  .description('List recent predictions')
-  .option('-d, --domain <domain>', 'Filter by domain')
-  .option('-l, --limit <number>', 'Limit results', '20')
-  .action(async (options) => {
-    const records = listPredictions({
-      domain: options.domain,
-      limit: Number(options.limit),
-    });
-
-    console.log('Recent Predictions');
-    console.log('─'.repeat(80));
-    for (const record of records) {
-      const outcome = record.predictedOutcome ?? '-';
-      const prob =
-        record.predictedProbability !== undefined
-          ? record.predictedProbability.toFixed(2)
-          : '-';
-      const domain = record.domain ?? '-';
-      console.log(
-        `${record.id} | ${outcome} | p=${prob} | ${domain} | ${record.marketTitle}`
-      );
-    }
-  });
-
-predictions
-  .command('show <id>')
-  .description('Show prediction details')
-  .action(async (id) => {
-    const record = getPrediction(id);
-    if (!record) {
-      console.log(`Prediction not found: ${id}`);
-      return;
-    }
-
-    console.log(`Prediction: ${record.id}`);
-    console.log('─'.repeat(60));
-    console.log(`Market: ${record.marketTitle}`);
-    console.log(`Outcome: ${record.predictedOutcome ?? '-'}`);
-    console.log(
-      `Probability: ${
-        record.predictedProbability !== undefined
-          ? record.predictedProbability.toFixed(2)
-          : '-'
-      }`
-    );
-    console.log(`Confidence: ${record.confidenceLevel ?? '-'}`);
-    console.log(`Domain: ${record.domain ?? '-'}`);
-    console.log(`Created: ${record.createdAt}`);
-    if (record.reasoning) {
-      console.log(`Reasoning: ${record.reasoning}`);
-    }
-  });
-
-predictions
-  .command('explain <id>')
-  .description('Explain a prediction decision')
-  .action(async (id) => {
-    const explanation = await explainPrediction({ predictionId: id, config });
-    console.log(explanation);
-  });
-
-predictions
-  .command('resolve')
-  .description('Resolve outcomes for recent predictions')
-  .option('-l, --limit <number>', 'Limit predictions checked', '25')
-  .action(async (options) => {
-    const updated = await resolveOutcomes(config, Number(options.limit));
-    console.log(`Resolved ${updated} prediction(s).`);
   });
 
 // ============================================================================
@@ -1352,7 +1108,7 @@ program
 
     console.log(heading);
     console.log('═'.repeat(72));
-    console.log(`Predictions: ${summary.totals.predictions}`);
+    console.log(`Decisions: ${summary.totals.predictions}`);
     console.log(`Executed: ${summary.totals.executedPredictions}`);
     console.log(`Resolved: ${summary.totals.resolvedPredictions}`);
     console.log(`Accuracy: ${pct(summary.totals.accuracy)} | Brier: ${num(summary.totals.avgBrier)}`);
@@ -1386,30 +1142,6 @@ program
             `${pct(row.accuracy)} | ${num(row.avgBrier)} | ${pct(row.avgEdge)} | ${row.resolvedPredictions}`
         );
       }
-    }
-  });
-
-calibration
-  .command('history')
-  .description('Show prediction outcome history')
-  .option('-d, --domain <domain>', 'Filter by domain')
-  .option('-l, --limit <number>', 'Limit results', '20')
-  .action(async (options) => {
-    console.log('Prediction History');
-    console.log('─'.repeat(60));
-    const history = listResolvedPredictions(Number(options.limit));
-    for (const item of history) {
-      if (options.domain && item.domain !== options.domain) {
-        continue;
-      }
-      const prob =
-        item.predictedProbability === undefined
-          ? '-'
-          : item.predictedProbability.toFixed(2);
-      const brier = item.brier === undefined ? '-' : item.brier.toFixed(4);
-      console.log(
-        `${item.outcomeTimestamp ?? ''} | ${item.marketTitle} | pred=${item.predictedOutcome ?? '-'} p=${prob} | outcome=${item.outcome ?? '-'} | brier=${brier}`
-      );
     }
   });
 
@@ -1513,7 +1245,10 @@ intel
 
     let watchlistTitles: string[] = [];
     if (alertsConfig.watchlistOnly) {
-      const markets = new AugurMarketClient(config);
+      const markets = createMarketClient(config);
+      if (!markets.isAvailable()) {
+        watchlistTitles = [];
+      } else {
       const watchlist = listWatchlist(50);
       for (const item of watchlist) {
         try {
@@ -1524,6 +1259,7 @@ intel
         } catch {
           continue;
         }
+      }
       }
     }
 
@@ -1562,18 +1298,34 @@ intel
   .description('Run proactive search (Clawdbot-style)')
   .option('--send', 'Send a direct summary to configured channels')
   .option('--max-queries <number>', 'Max search queries', '8')
+  .option('--iterations <number>', 'Research rounds', '2')
   .option('--watchlist-limit <number>', 'Watchlist markets to scan', '20')
   .option('--recent-intel-limit <number>', 'Recent intel items to seed queries', '25')
+  .option('--web-limit <number>', 'Web search results per query', '5')
+  .option('--fetch-per-query <number>', 'Pages to fetch per query', '1')
+  .option('--fetch-max-chars <number>', 'Max chars to keep when fetching pages', '4000')
+  .option('--learned-query-limit <number>', 'Number of learned queries to reuse', '8')
+  .option('--no-learned-queries', 'Disable learned query reuse')
   .option('--no-llm', 'Disable LLM query refinement')
   .option('--extra <query...>', 'Extra queries to include')
   .action(async (options) => {
     const result = await runProactiveSearch(config, {
       maxQueries: Number(options.maxQueries),
+      iterations: Number(options.iterations),
       watchlistLimit: Number(options.watchlistLimit),
       useLlm: options.llm !== false,
       recentIntelLimit: Number(options.recentIntelLimit),
       extraQueries: Array.isArray(options.extra) ? options.extra : [],
+      includeLearnedQueries: options.learnedQueries !== false,
+      learnedQueryLimit: Number(options.learnedQueryLimit),
+      webLimitPerQuery: Number(options.webLimit),
+      fetchPerQuery: Number(options.fetchPerQuery),
+      fetchMaxChars: Number(options.fetchMaxChars),
     });
+    console.log(`Rounds: ${result.rounds}`);
+    if (result.learnedSeedQueries.length > 0) {
+      console.log(`Learned seeds: ${result.learnedSeedQueries.join(' | ')}`);
+    }
     console.log(`Queries: ${result.queries.join(' | ')}`);
     console.log(`Stored items: ${result.storedCount}`);
     if (options.send) {
@@ -1596,6 +1348,27 @@ intel
     }
   });
 
+intel
+  .command('proactive-stats')
+  .description('Show learned proactive query performance stats')
+  .option('--limit <number>', 'Max rows', '20')
+  .action((options) => {
+    const stats = listProactiveQueryStats(Number(options.limit));
+    if (stats.length === 0) {
+      console.log('No proactive query stats yet.');
+      return;
+    }
+
+    for (const row of stats) {
+      console.log(
+        `${row.query} | score=${row.score.toFixed(2)} runs=${row.runs} success=${row.successes} new_items=${row.totalNewItems} web=${row.totalWebResults} fetch=${row.totalWebFetches}`
+      );
+      if (row.lastError) {
+        console.log(`  last_error: ${row.lastError}`);
+      }
+    }
+  });
+
 // ============================================================================
 // Agent Commands
 // ============================================================================
@@ -1606,15 +1379,14 @@ program
   .action(async () => {
     const { createLlmClient, createTrivialTaskClient } = await import('../core/llm.js');
     const { ConversationHandler } = await import('../core/conversation.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const readline = await import('node:readline');
 
     console.log('Starting Thufir chat...');
-    console.log('Ask me about future events, prediction markets, or anything you want to forecast.');
+    console.log('Ask me about markets, positioning, or anything you want to analyze.');
     console.log('Type "exit" or "quit" to end the conversation.\n');
 
     const llm = createLlmClient(config);
-    const marketClient = new AugurMarketClient(config);
+    const marketClient = createMarketClient(config);
     const infoLlm = createTrivialTaskClient(config) ?? undefined;
     const conversation = new ConversationHandler(llm, marketClient, config, infoLlm);
     const userId = 'cli-user';
@@ -1684,11 +1456,10 @@ agent
     }
 
     const { createLlmClient } = await import('../core/llm.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const { SessionStore } = await import('../memory/session_store.js');
 
     const llm = createLlmClient(config);
-    const marketClient = new AugurMarketClient(config);
+    const marketClient = createMarketClient(config);
     const executor = await createExecutorForConfig(config, options.password);
     const limiter = new DbSpendingLimitEnforcer({
       daily: config.wallet?.limits?.daily ?? 100,
@@ -1769,8 +1540,9 @@ agent
           { mode: 'FULL_AGENT', critical: false, reason: 'mentat_report', source: 'cli' },
           () =>
             runMentatScan({
-              system: config.agent?.mentatSystem ?? 'Augur',
+              system: config.agent?.mentatSystem ?? 'Markets',
               llm,
+              config,
               marketClient,
               marketQuery: config.agent?.mentatMarketQuery,
               limit: config.agent?.mentatMarketLimit,
@@ -1797,7 +1569,6 @@ program
   .action(async (market, options) => {
     const { createLlmClient, createTrivialTaskClient } = await import('../core/llm.js');
     const { ConversationHandler } = await import('../core/conversation.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const ora = await import('ora');
 
     console.log(`Analyzing market: ${market}`);
@@ -1807,7 +1578,10 @@ program
 
     try {
       const llm = createLlmClient(config);
-      const markets = new AugurMarketClient(config);
+      const markets = createMarketClient(config);
+      if (!markets.isAvailable()) {
+        throw new Error('Market client is not configured.');
+      }
       const infoLlm = createTrivialTaskClient(config) ?? undefined;
       const conversation = new ConversationHandler(llm, markets, config, infoLlm);
 
@@ -1845,7 +1619,6 @@ mentat
   .option('--no-store', 'Do not store results')
   .action(async (options) => {
     const { createLlmClient } = await import('../core/llm.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const { runMentatScan, formatMentatScan } = await import('../mentat/scan.js');
     const ora = await import('ora');
 
@@ -1853,11 +1626,12 @@ mentat
 
     try {
       const llm = createLlmClient(config);
-      const markets = new AugurMarketClient(config);
+      const markets = createMarketClient(config);
 
       const scan = await runMentatScan({
         system: String(options.system),
         llm,
+        config,
         marketClient: markets,
         marketIds: Array.isArray(options.market) ? options.market : undefined,
         marketQuery: options.query ? String(options.query) : undefined,
@@ -1884,7 +1658,6 @@ mentat
   .option('--query <query>', 'Search query for markets')
   .option('--intel-limit <number>', 'Recent intel items to include', '40')
   .action(async (options) => {
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const { collectMentatSignals } = await import('../mentat/scan.js');
     const { computeDetectorBundle } = await import('../mentat/detectors.js');
     const { generateMentatReport, formatMentatReport } = await import('../mentat/report.js');
@@ -1895,7 +1668,7 @@ mentat
     try {
       let detectors: ReturnType<typeof computeDetectorBundle> | undefined;
       if (options.refresh) {
-        const markets = new AugurMarketClient(config);
+        const markets = createMarketClient(config);
         const signals = await collectMentatSignals({
           system: String(options.system),
           marketClient: markets,
@@ -1927,7 +1700,6 @@ program
   .action(async (topicParts) => {
     const { createLlmClient, createTrivialTaskClient } = await import('../core/llm.js');
     const { ConversationHandler } = await import('../core/conversation.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const ora = await import('ora');
 
     const topic = topicParts.join(' ');
@@ -1938,7 +1710,7 @@ program
 
     try {
       const llm = createLlmClient(config);
-      const markets = new AugurMarketClient(config);
+      const markets = createMarketClient(config);
       const infoLlm = createTrivialTaskClient(config) ?? undefined;
       const conversation = new ConversationHandler(llm, markets, config, infoLlm);
 
@@ -1961,7 +1733,6 @@ program
   .description('Get today\'s top 10 trading opportunities')
   .action(async () => {
     const { createLlmClient } = await import('../core/llm.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const { generateDailyReport, formatDailyReport } = await import('../core/opportunities.js');
     const ora = await import('ora');
 
@@ -1969,7 +1740,7 @@ program
 
     try {
       const llm = createLlmClient(config);
-      const markets = new AugurMarketClient(config);
+      const markets = createMarketClient(config);
 
       const report = await generateDailyReport(llm, markets, config);
       spinner.stop();
@@ -1987,13 +1758,12 @@ auto
   .description('Show autonomous mode status')
   .action(async () => {
     const { createLlmClient } = await import('../core/llm.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const { PaperExecutor } = await import('../execution/modes/paper.js');
     const { DbSpendingLimitEnforcer } = await import('../execution/wallet/limits_db.js');
     const { AutonomousManager } = await import('../core/autonomous.js');
 
     const llm = createLlmClient(config);
-    const markets = new AugurMarketClient(config);
+    const markets = createMarketClient(config);
     const executor = new PaperExecutor();
     const limiter = new DbSpendingLimitEnforcer({
       daily: config.wallet?.limits?.daily ?? 100,
@@ -2042,7 +1812,6 @@ auto
   .description('Generate full daily report')
   .action(async () => {
     const { createLlmClient } = await import('../core/llm.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
     const { PaperExecutor } = await import('../execution/modes/paper.js');
     const { DbSpendingLimitEnforcer } = await import('../execution/wallet/limits_db.js');
     const { AutonomousManager } = await import('../core/autonomous.js');
@@ -2052,7 +1821,7 @@ auto
 
     try {
       const llm = createLlmClient(config);
-      const markets = new AugurMarketClient(config);
+      const markets = createMarketClient(config);
       const executor = new PaperExecutor();
       const limiter = new DbSpendingLimitEnforcer({
         daily: config.wallet?.limits?.daily ?? 100,
@@ -2295,12 +2064,9 @@ program
   .description('Generate technical + news signals for configured symbols')
   .option('-s, --symbol <symbol>', 'Symbol override (e.g., BTC/USDT)')
   .option('-t, --timeframe <tf>', 'Timeframe override')
-  .option('--map-augur', 'Map signals to Augur crypto markets', false)
   .action(async (options) => {
     const { getTechnicalSnapshot } = await import('../technical/snapshot.js');
     const { buildTradeSignal } = await import('../technical/signals.js');
-    const { mapSignalToAugurMarket } = await import('../technical/augur.js');
-    const { AugurMarketClient } = await import('../execution/augur/markets.js');
 
     const symbols = options.symbol
       ? [String(options.symbol)]
@@ -2308,12 +2074,6 @@ program
     const timeframes = (options.timeframe
       ? [String(options.timeframe)]
       : config.technical?.timeframes ?? ['1h']) as Timeframe[];
-
-    let augurMarkets = [] as Array<import('../execution/markets.js').Market>;
-    if (options.mapAugur && config.augur?.enabled) {
-      const marketClient = new AugurMarketClient(config);
-      augurMarkets = await marketClient.listMarkets(50);
-    }
 
     for (const symbol of symbols) {
       for (const timeframe of timeframes) {
@@ -2333,15 +2093,6 @@ program
         console.log(`Direction: ${signal.direction} (confidence ${signal.confidence.toFixed(2)})`);
         console.log(`Scores: technical=${signal.technicalScore.toFixed(2)} news=${signal.newsScore.toFixed(2)} onchain=${signal.onChainScore.toFixed(2)}`);
         console.log(`Entry: ${signal.entryPrice.toFixed(2)} Stop: ${signal.stopLoss.toFixed(2)} TP: ${signal.takeProfit.map((v) => v.toFixed(2)).join(', ')}`);
-
-        if (options.mapAugur && augurMarkets.length > 0) {
-          const decision = mapSignalToAugurMarket(signal, augurMarkets);
-          if (decision.action === 'bet') {
-            console.log(`Augur bet: ${decision.marketId} ${decision.outcome} size=${decision.size?.toFixed(4)} (${decision.reason})`);
-          } else {
-            console.log(`Augur bet: skip (${decision.reason})`);
-          }
-        }
       }
     }
   });

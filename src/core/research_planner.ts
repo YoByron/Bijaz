@@ -1,7 +1,8 @@
 import type { LlmClient } from './llm.js';
 import { withExecutionContextIfMissing } from './llm_infra.js';
 import type { ThufirConfig } from './config.js';
-import type { Market, AugurMarketClient } from '../execution/augur/markets.js';
+import type { Market } from '../execution/markets.js';
+import type { MarketClient } from '../execution/market-client.js';
 import { listWatchlist } from '../memory/watchlist.js';
 import { listIntelByIds } from '../intel/store.js';
 import { ToolRegistry } from './tools.js';
@@ -58,7 +59,7 @@ export async function createResearchPlan(params: {
 }): Promise<ResearchPlan> {
   const maxSteps = Math.max(2, params.maxSteps ?? 5);
   const prompt = [
-    'Create a short research plan for a prediction market analysis.',
+    'Create a short research plan for a perp market analysis.',
     `Return JSON with shape: {"steps":[{"action":"intel.search|intel.semantic|market.related|calibration.get|watchlist.check","query":"optional"}]}.`,
     `Use at most ${maxSteps} steps. Use "query" only when needed.`,
     `Subject: ${params.subject}`,
@@ -117,7 +118,7 @@ function formatIntelList(
 
 export async function runResearchPlan(params: {
   config: ThufirConfig;
-  marketClient: AugurMarketClient;
+  marketClient: MarketClient;
   subject: { id?: string; question: string; category?: string };
   plan: ResearchPlan;
   tools?: ToolRegistry;

@@ -41,13 +41,23 @@ const ConfigSchema = z.object({
     maxPromptChars: z.number().default(120000),
     maxToolResultChars: z.number().default(8000),
     mentatAutoScan: z.boolean().default(false),
-    mentatSystem: z.string().default('Augur'),
+    mentatSystem: z.string().default('Markets'),
     mentatMarketQuery: z.string().optional(),
     mentatMarketLimit: z.number().optional(),
     mentatIntelLimit: z.number().optional(),
     enablePreTradeFragility: z.boolean().default(true),
     trivialTaskProvider: z.enum(['local', 'openai', 'anthropic']).default('local'),
     trivialTaskModel: z.string().default('qwen2.5:1.5b-instruct'),
+    systemTools: z
+      .object({
+        enabled: z.boolean().default(false),
+        allowedCommands: z.array(z.string()).default(['node', 'npm', 'pnpm', 'bun', 'qmd']),
+        allowedManagers: z.array(z.enum(['npm', 'pnpm', 'bun'])).default(['pnpm', 'npm', 'bun']),
+        allowGlobalInstall: z.boolean().default(false),
+        timeoutMs: z.number().default(120000),
+        maxOutputChars: z.number().default(12000),
+      })
+      .default({}),
     trivial: z
       .object({
         enabled: z.boolean().default(true),
@@ -102,12 +112,14 @@ const ConfigSchema = z.object({
   execution: z
     .object({
       mode: z.enum(['paper', 'webhook', 'live']).default('paper'),
+      provider: z.enum(['hyperliquid']).default('hyperliquid'),
       webhookUrl: z.string().optional(),
     })
     .default({}),
   wallet: z
     .object({
       keystorePath: z.string().optional(),
+      rpcUrl: z.string().optional(),
       limits: z
         .object({
           daily: z.number().default(100),
@@ -121,15 +133,35 @@ const ConfigSchema = z.object({
           maxDomainPercent: z.number().default(40),
         })
         .default({}),
+      perps: z
+        .object({
+          maxLeverage: z.number().optional(),
+          maxOrderNotionalUsd: z.number().optional(),
+          maxTotalNotionalUsd: z.number().optional(),
+          minLiquidationDistanceBps: z.number().optional(),
+          correlationCaps: z
+            .array(
+              z.object({
+                name: z.string(),
+                symbols: z.array(z.string()),
+                maxNotionalUsd: z.number(),
+              })
+            )
+            .default([]),
+        })
+        .default({}),
     })
     .default({}),
-  augur: z
+  hyperliquid: z
     .object({
       enabled: z.boolean().default(true),
-      subgraph: z.string().default('https://api.thegraph.com/subgraphs/name/augurproject/augur-turbo-matic'),
-      rpcUrl: z.string().optional(),
-      slippageTolerance: z.number().default(0.02),
-      marketTypes: z.array(z.enum(['crypto', 'sports', 'mma'])).default(['crypto']),
+      baseUrl: z.string().default('https://api.hyperliquid.xyz'),
+      wsUrl: z.string().default('wss://api.hyperliquid.xyz/ws'),
+      accountAddress: z.string().optional(),
+      privateKey: z.string().optional(),
+      maxLeverage: z.number().default(5),
+      defaultSlippageBps: z.number().default(10),
+      symbols: z.array(z.string()).default(['BTC', 'ETH']),
     })
     .default({}),
   technical: z
@@ -310,6 +342,16 @@ const ConfigSchema = z.object({
                   proxyBaseUrl: z.string().optional(),
                   trivialTaskProvider: z.enum(['local', 'openai', 'anthropic']).optional(),
                   trivialTaskModel: z.string().optional(),
+                  systemTools: z
+                    .object({
+                      enabled: z.boolean().optional(),
+                      allowedCommands: z.array(z.string()).optional(),
+                      allowedManagers: z.array(z.enum(['npm', 'pnpm', 'bun'])).optional(),
+                      allowGlobalInstall: z.boolean().optional(),
+                      timeoutMs: z.number().optional(),
+                      maxOutputChars: z.number().optional(),
+                    })
+                    .default({}),
                   trivial: z
                     .object({
                       enabled: z.boolean().optional(),
@@ -387,6 +429,8 @@ const ConfigSchema = z.object({
       watchlistOnly: z.boolean().default(true),
       eventDriven: z.boolean().default(false),
       eventDrivenMinItems: z.number().default(1),
+      strategy: z.enum(['opportunity', 'discovery']).default('discovery'),
+      probeRiskFraction: z.number().default(0.005),
       // Full autonomous mode options
       fullAuto: z.boolean().default(false),
       minEdge: z.number().default(0.05),
@@ -440,10 +484,16 @@ const ConfigSchema = z.object({
           mode: z.enum(['schedule', 'heartbeat', 'direct']).default('schedule'),
           time: z.string().default('07:30'),
           maxQueries: z.number().default(8),
+          iterations: z.number().default(2),
           watchlistLimit: z.number().default(20),
           useLlm: z.boolean().default(true),
           recentIntelLimit: z.number().default(25),
           extraQueries: z.array(z.string()).default([]),
+          includeLearnedQueries: z.boolean().default(true),
+          learnedQueryLimit: z.number().default(8),
+          webLimitPerQuery: z.number().default(5),
+          fetchPerQuery: z.number().default(1),
+          fetchMaxChars: z.number().default(4000),
           channels: z.array(z.string()).default([]),
         })
         .default({}),
@@ -489,7 +539,7 @@ const ConfigSchema = z.object({
           time: z.string().default('09:00'),
           intervalMinutes: z.number().optional(),
           channels: z.array(z.string()).default([]),
-          system: z.string().default('Augur'),
+          system: z.string().default('Markets'),
           marketQuery: z.string().optional(),
           marketLimit: z.number().default(25),
           intelLimit: z.number().default(40),
