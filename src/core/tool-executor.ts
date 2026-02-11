@@ -1,14 +1,20 @@
 import type { ThufirConfig } from './config.js';
-import type { Market, AugurMarketClient } from '../execution/augur/markets.js';
+import type { Market } from '../execution/markets.js';
+import type { MarketClient } from '../execution/market-client.js';
 import type { ExecutionAdapter, TradeDecision } from '../execution/executor.js';
 import type { LimitCheckResult } from '../execution/wallet/limits.js';
+import { checkPerpRiskLimits } from '../execution/perp-risk.js';
 import { listCalibrationSummaries } from '../memory/calibration.js';
 import { listRecentIntel, searchIntel, type StoredIntel } from '../intel/store.js';
-import { listOpenPositions, listPredictions, createPrediction } from '../memory/predictions.js';
-import { listMarketCategories } from '../memory/market_cache.js';
 import { upsertAssumption, upsertFragilityCard, upsertMechanism } from '../memory/mentat.js';
-import { checkExposureLimits } from './exposure.js';
-import { loadKeystore } from '../execution/wallet/keystore.js';
+import { HyperliquidClient } from '../execution/hyperliquid/client.js';
+import { runDiscovery } from '../discovery/engine.js';
+import {
+  signalPriceVolRegime,
+  signalHyperliquidFundingOISkew,
+  signalHyperliquidOrderflowImbalance,
+} from '../discovery/signals.js';
+import { listPerpTrades } from '../memory/perp_trades.js';
 
 /** Minimal interface for spending limit enforcement used in tool execution */
 export interface ToolSpendingLimiter {
@@ -20,10 +26,11 @@ export interface ToolSpendingLimiter {
 import { getCashBalance } from '../memory/portfolio.js';
 import { getWalletBalances } from '../execution/wallet/balances.js';
 import { loadWallet } from '../execution/wallet/manager.js';
+import { loadKeystore } from '../execution/wallet/keystore.js';
 import { Readability } from '@mozilla/readability';
 import { JSDOM } from 'jsdom';
 import { isIP } from 'node:net';
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -32,9 +39,20 @@ import { homedir } from 'node:os';
 
 const execAsync = promisify(exec);
 
+type InstallManager = 'npm' | 'pnpm' | 'bun';
+
+interface SystemToolPolicy {
+  enabled: boolean;
+  allowedCommands: Set<string>;
+  allowedManagers: Set<InstallManager>;
+  allowGlobalInstall: boolean;
+  timeoutMs: number;
+  maxOutputChars: number;
+}
+
 export interface ToolExecutorContext {
   config: ThufirConfig;
-  marketClient: AugurMarketClient;
+  marketClient: MarketClient;
   executor?: ExecutionAdapter;
   limiter?: ToolSpendingLimiter;
 }
@@ -43,6 +61,120 @@ export type ToolResult =
   | { success: true; data: unknown }
   | { success: false; error: string };
 
+function getSystemToolPolicy(config: ThufirConfig): SystemToolPolicy {
+  const settings = config.agent?.systemTools;
+  const allowedCommands = Array.isArray(settings?.allowedCommands)
+    ? settings.allowedCommands
+    : ['node', 'npm', 'pnpm', 'bun', 'qmd'];
+  const allowedManagersRaw = Array.isArray(settings?.allowedManagers)
+    ? settings.allowedManagers
+    : ['pnpm', 'npm', 'bun'];
+  const allowedManagers = new Set<InstallManager>(
+    allowedManagersRaw.filter((manager): manager is InstallManager =>
+      manager === 'npm' || manager === 'pnpm' || manager === 'bun'
+    )
+  );
+
+  return {
+    enabled: settings?.enabled ?? false,
+    allowedCommands: new Set(
+      allowedCommands
+        .map((command) => command.trim())
+        .filter((command) => command.length > 0)
+    ),
+    allowedManagers,
+    allowGlobalInstall: settings?.allowGlobalInstall ?? false,
+    timeoutMs: Math.min(Math.max(settings?.timeoutMs ?? 120000, 1000), 10 * 60 * 1000),
+    maxOutputChars: Math.min(Math.max(settings?.maxOutputChars ?? 12000, 1000), 200000),
+  };
+}
+
+function isSafeCommandName(command: string): boolean {
+  if (!command) return false;
+  if (command.includes('/') || command.includes('\\')) return false;
+  return /^[a-zA-Z0-9._-]+$/.test(command);
+}
+
+function isSafePackageSpec(spec: string): boolean {
+  if (!spec) return false;
+  if (spec.length > 150) return false;
+  return /^[a-zA-Z0-9@._/:+\-#~]+$/.test(spec);
+}
+
+async function runCommand(
+  command: string,
+  args: string[],
+  options: {
+    timeoutMs: number;
+    maxOutputChars: number;
+    cwd?: string;
+  }
+): Promise<{
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      shell: false,
+      cwd: options.cwd,
+      env: process.env,
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let done = false;
+    let timedOut = false;
+
+    const trimToLimit = (text: string): string => {
+      if (text.length <= options.maxOutputChars) return text;
+      return text.slice(text.length - options.maxOutputChars);
+    };
+
+    const finish = (exitCode: number) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({
+        exitCode,
+        stdout: trimToLimit(stdout),
+        stderr: trimToLimit(stderr),
+        timedOut,
+      });
+    };
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+      setTimeout(() => child.kill('SIGKILL'), 1500).unref();
+    }, options.timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > options.maxOutputChars * 2) {
+        stdout = stdout.slice(stdout.length - options.maxOutputChars * 2);
+      }
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > options.maxOutputChars * 2) {
+        stderr = stderr.slice(stderr.length - options.maxOutputChars * 2);
+      }
+    });
+
+    child.on('error', (error) => {
+      stderr += error.message;
+      finish(1);
+    });
+
+    child.on('close', (code) => {
+      finish(code ?? 0);
+    });
+  });
+}
+
 export async function executeToolCall(
   toolName: string,
   toolInput: Record<string, unknown>,
@@ -50,23 +182,187 @@ export async function executeToolCall(
 ): Promise<ToolResult> {
   try {
     switch (toolName) {
-      case 'market_search': {
-        const query = String(toolInput.query ?? '');
-        const limit = Math.min(Number(toolInput.limit ?? 5), 20);
-        const markets = await ctx.marketClient.searchMarkets(query, limit);
+      case 'perp_market_list': {
+        const limit = Math.min(Number(toolInput.limit ?? 20), 200);
+        const markets = await ctx.marketClient.listMarkets(limit);
         return { success: true, data: formatMarketsForTool(markets) };
       }
 
-      case 'market_get': {
-        const marketId = String(toolInput.market_id ?? '');
-        const market = await ctx.marketClient.getMarket(marketId);
-        return { success: true, data: formatMarketForTool(market) };
+      case 'perp_market_get': {
+        const symbol = String(toolInput.symbol ?? '');
+        if (!symbol) {
+          return { success: false, error: 'Missing symbol' };
+        }
+        try {
+          const market = await ctx.marketClient.getMarket(symbol);
+          return { success: true, data: formatMarketForTool(market) };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
       }
 
-      case 'market_categories': {
-        const limit = Math.min(Number(toolInput.limit ?? 20), 100);
-        const categories = listMarketCategories(limit);
-        return { success: true, data: categories };
+      case 'perp_place_order': {
+        if (!ctx.executor) {
+          return { success: false, error: 'Trading is not enabled (no executor configured)' };
+        }
+        if (!ctx.limiter) {
+          return { success: false, error: 'Trading is not enabled (no spending limiter configured)' };
+        }
+        const symbol = String(toolInput.symbol ?? '');
+        const side = String(toolInput.side ?? '').toLowerCase();
+        const size = Number(toolInput.size ?? 0);
+        const orderTypeRaw = String(toolInput.order_type ?? 'market').toLowerCase();
+        const orderType: 'market' | 'limit' = orderTypeRaw === 'limit' ? 'limit' : 'market';
+        const price = toolInput.price !== undefined ? Number(toolInput.price) : undefined;
+        const leverage = toolInput.leverage !== undefined ? Number(toolInput.leverage) : undefined;
+        const reduceOnly = Boolean(toolInput.reduce_only ?? false);
+        if (!symbol || !size || (side !== 'buy' && side !== 'sell')) {
+          return { success: false, error: 'Missing or invalid order fields' };
+        }
+        const market = await ctx.marketClient.getMarket(symbol);
+        const riskCheck = await checkPerpRiskLimits({
+          config: ctx.config,
+          symbol,
+          side: side as 'buy' | 'sell',
+          size,
+          leverage,
+          reduceOnly,
+          markPrice: market.markPrice ?? null,
+          marketMaxLeverage:
+            typeof market.metadata?.maxLeverage === 'number'
+              ? (market.metadata.maxLeverage as number)
+              : null,
+        });
+        if (!riskCheck.allowed) {
+          return { success: false, error: riskCheck.reason ?? 'perp risk limits exceeded' };
+        }
+        const limitCheck = await ctx.limiter.checkAndReserve(size);
+        if (!limitCheck.allowed) {
+          return { success: false, error: limitCheck.reason ?? 'limit exceeded' };
+        }
+        const decision: TradeDecision = {
+          action: side as 'buy' | 'sell',
+          symbol,
+          side: side as 'buy' | 'sell',
+          size,
+          orderType,
+          price,
+          leverage,
+          reduceOnly,
+          confidence: 'medium' as const,
+        };
+        const result = await ctx.executor.execute(market, decision);
+        if (!result.executed) {
+          ctx.limiter.release(size);
+          return { success: false, error: result.message };
+        }
+        ctx.limiter.confirm(size);
+        return { success: true, data: result };
+      }
+
+      case 'perp_open_orders': {
+        if (!ctx.executor) {
+          return { success: false, error: 'Trading is not enabled (no executor configured)' };
+        }
+        try {
+          const orders = await ctx.executor.getOpenOrders();
+          return { success: true, data: { orders } };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'perp_cancel_order': {
+        if (!ctx.executor) {
+          return { success: false, error: 'Trading is not enabled (no executor configured)' };
+        }
+        const orderId = String(toolInput.order_id ?? '').trim();
+        if (!orderId) {
+          return { success: false, error: 'Missing order_id' };
+        }
+        try {
+          await ctx.executor.cancelOrder(orderId);
+          return { success: true, data: { cancelled: true, order_id: orderId } };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'perp_positions': {
+        const { HyperliquidClient } = await import('../execution/hyperliquid/client.js');
+        try {
+          const client = new HyperliquidClient(ctx.config);
+          const state = await client.getClearinghouseState();
+          return { success: true, data: state };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'perp_analyze': {
+        const symbol = String(toolInput.symbol ?? '').trim();
+        const horizon = String(toolInput.horizon ?? '').trim();
+        const probabilityMode = String(toolInput.probability_mode ?? '').trim();
+        if (!symbol) {
+          return { success: false, error: 'Missing symbol' };
+        }
+        try {
+          const analysis = await analyzePerpMarket(
+            ctx,
+            symbol,
+            horizon || undefined,
+            probabilityMode || undefined
+          );
+          return { success: true, data: analysis };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'position_analysis': {
+        const minBufferPct = Number(toolInput.min_liq_buffer_pct ?? 10);
+        const maxConcentrationPct = Number(toolInput.max_concentration_pct ?? 40);
+        const leverageWarning = Number(toolInput.leverage_warning ?? 5);
+        try {
+          const analysis = await analyzePositions(
+            ctx,
+            Number.isFinite(minBufferPct) ? minBufferPct : 12,
+            Number.isFinite(maxConcentrationPct) ? maxConcentrationPct : 40,
+            Number.isFinite(leverageWarning) ? leverageWarning : 5
+          );
+          return { success: true, data: analysis };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'discovery_report': {
+        const limit = Math.min(Math.max(Number(toolInput.limit ?? 5), 1), 20);
+        try {
+          const report = await buildDiscoveryReport(ctx.config, limit);
+          return { success: true, data: report };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
+      }
+
+      case 'trade_review': {
+        const limit = Math.min(Math.max(Number(toolInput.limit ?? 20), 1), 200);
+        const symbol = String(toolInput.symbol ?? '').trim();
+        try {
+          const review = await buildTradeReview(ctx, symbol || undefined, limit);
+          return { success: true, data: review };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
       }
 
       case 'intel_search': {
@@ -81,6 +377,61 @@ export async function executeToolCall(
         const limit = Number(toolInput.limit ?? 10);
         const items = listRecentIntel(limit);
         return { success: true, data: formatIntelForTool(items) };
+      }
+
+      case 'signal_price_vol_regime': {
+        const symbol = String(toolInput.symbol ?? '');
+        if (!symbol) {
+          return { success: false, error: 'Missing symbol' };
+        }
+        const { signalPriceVolRegime } = await import('../discovery/signals.js');
+        const signal = await signalPriceVolRegime(ctx.config, symbol);
+        if (!signal) {
+          return { success: false, error: 'Insufficient data for signal' };
+        }
+        return { success: true, data: signal };
+      }
+
+      case 'signal_cross_asset_divergence': {
+        const symbols = Array.isArray(toolInput.symbols) ? toolInput.symbols.map(String) : [];
+        if (symbols.length < 2) {
+          return { success: false, error: 'Need at least two symbols' };
+        }
+        const { signalCrossAssetDivergence } = await import('../discovery/signals.js');
+        const signals = await signalCrossAssetDivergence(ctx.config, symbols);
+        return { success: true, data: signals };
+      }
+
+      case 'signal_hyperliquid_funding_oi_skew': {
+        const symbol = String(toolInput.symbol ?? '');
+        if (!symbol) {
+          return { success: false, error: 'Missing symbol' };
+        }
+        const { signalHyperliquidFundingOISkew } = await import('../discovery/signals.js');
+        const signal = await signalHyperliquidFundingOISkew(ctx.config, symbol);
+        if (!signal) {
+          return { success: false, error: 'Insufficient data for signal' };
+        }
+        return { success: true, data: signal };
+      }
+
+      case 'signal_hyperliquid_orderflow_imbalance': {
+        const symbol = String(toolInput.symbol ?? '');
+        if (!symbol) {
+          return { success: false, error: 'Missing symbol' };
+        }
+        const { signalHyperliquidOrderflowImbalance } = await import('../discovery/signals.js');
+        const signal = await signalHyperliquidOrderflowImbalance(ctx.config, symbol);
+        if (!signal) {
+          return { success: false, error: 'Insufficient data for signal' };
+        }
+        return { success: true, data: signal };
+      }
+
+      case 'discovery_run': {
+        const { runDiscovery } = await import('../discovery/engine.js');
+        const result = await runDiscovery(ctx.config);
+        return { success: true, data: result };
       }
 
       case 'calibration_stats': {
@@ -123,6 +474,139 @@ export async function executeToolCall(
             formatted,
             timezone,
             day_of_week: now.toLocaleDateString('en-US', { weekday: 'long' }),
+          },
+        };
+      }
+
+      case 'system_exec': {
+        const policy = getSystemToolPolicy(ctx.config);
+        if (!policy.enabled) {
+          return { success: false, error: 'System tools are disabled in config (agent.systemTools.enabled=false)' };
+        }
+
+        const command = String(toolInput.command ?? '').trim();
+        if (!isSafeCommandName(command)) {
+          return { success: false, error: 'Invalid command' };
+        }
+        if (!policy.allowedCommands.has(command)) {
+          return { success: false, error: `Command not allowed: ${command}` };
+        }
+
+        const argsInput = Array.isArray(toolInput.args) ? toolInput.args : [];
+        const args = argsInput.map((arg) => String(arg)).map((arg) => arg.trim());
+        if (args.length > 50) {
+          return { success: false, error: 'Too many arguments' };
+        }
+        for (const arg of args) {
+          if (arg.length > 1000 || /[\r\n]/.test(arg)) {
+            return { success: false, error: 'Invalid argument content' };
+          }
+        }
+
+        const cwdRaw = typeof toolInput.cwd === 'string' ? toolInput.cwd.trim() : '';
+        const cwd = cwdRaw.length > 0 ? cwdRaw : undefined;
+        const run = await runCommand(command, args, {
+          timeoutMs: policy.timeoutMs,
+          maxOutputChars: policy.maxOutputChars,
+          cwd,
+        });
+        if (run.exitCode !== 0) {
+          const error = [
+            `Command failed (exit ${run.exitCode})`,
+            run.timedOut ? 'Timed out' : '',
+            run.stderr,
+          ]
+            .filter(Boolean)
+            .join(': ');
+          return { success: false, error };
+        }
+        return {
+          success: true,
+          data: {
+            command,
+            args,
+            stdout: run.stdout,
+            stderr: run.stderr,
+            exitCode: run.exitCode,
+            timedOut: run.timedOut,
+          },
+        };
+      }
+
+      case 'system_install': {
+        const policy = getSystemToolPolicy(ctx.config);
+        if (!policy.enabled) {
+          return { success: false, error: 'System tools are disabled in config (agent.systemTools.enabled=false)' };
+        }
+
+        const manager = String(toolInput.manager ?? 'pnpm').trim().toLowerCase() as InstallManager;
+        if (!policy.allowedManagers.has(manager)) {
+          return { success: false, error: `Package manager not allowed: ${manager}` };
+        }
+
+        const isGlobal = Boolean(toolInput.global ?? false);
+        if (isGlobal && !policy.allowGlobalInstall) {
+          return { success: false, error: 'Global installs are disabled (agent.systemTools.allowGlobalInstall=false)' };
+        }
+
+        const packages = Array.isArray(toolInput.packages)
+          ? toolInput.packages.map((entry) => String(entry).trim()).filter(Boolean)
+          : [];
+        if (packages.length === 0) {
+          return { success: false, error: 'Missing packages' };
+        }
+        if (packages.length > 20) {
+          return { success: false, error: 'Too many packages' };
+        }
+        if (!packages.every(isSafePackageSpec)) {
+          return { success: false, error: 'Package spec contains invalid characters' };
+        }
+
+        let args: string[];
+        switch (manager) {
+          case 'pnpm':
+            args = ['add', ...(isGlobal ? ['-g'] : []), ...packages];
+            break;
+          case 'npm':
+            args = ['install', ...(isGlobal ? ['-g'] : []), ...packages];
+            break;
+          case 'bun':
+            args = ['add', ...(isGlobal ? ['-g'] : []), ...packages];
+            break;
+          default:
+            return { success: false, error: `Unsupported manager: ${manager}` };
+        }
+
+        const cwdRaw = typeof toolInput.cwd === 'string' ? toolInput.cwd.trim() : '';
+        const cwd = cwdRaw.length > 0 ? cwdRaw : undefined;
+        const run = await runCommand(manager, args, {
+          timeoutMs: policy.timeoutMs,
+          maxOutputChars: policy.maxOutputChars,
+          cwd,
+        });
+
+        if (run.exitCode !== 0) {
+          const error = [
+            `Install failed (exit ${run.exitCode})`,
+            run.timedOut ? 'Timed out' : '',
+            run.stderr,
+          ]
+            .filter(Boolean)
+            .join(': ');
+          return { success: false, error };
+        }
+
+        return {
+          success: true,
+          data: {
+            manager,
+            packages,
+            global: isGlobal,
+            args,
+            stdout: run.stdout,
+            stderr: run.stderr,
+            exitCode: run.exitCode,
+            timedOut: run.timedOut,
           },
         };
       }
@@ -182,9 +666,17 @@ export async function executeToolCall(
           return braveResult;
         }
 
+        const ddgResult = await searchWebViaDuckDuckGo(query, limit);
+        if (ddgResult.success) {
+          if (ctx.config.qmd?.enabled && ctx.config.qmd?.autoIndexWebSearch) {
+            autoIndexWebSearchResults(query, ddgResult.data, ctx).catch(() => {});
+          }
+          return ddgResult;
+        }
+
         return {
           success: false,
-          error: `Web search failed: SerpAPI: ${serpResult.error}. Brave: ${braveResult.error}`,
+          error: `Web search failed: SerpAPI: ${serpResult.error}. Brave: ${braveResult.error}. DuckDuckGo: ${ddgResult.error}`,
         };
       }
 
@@ -192,10 +684,14 @@ export async function executeToolCall(
         return getPortfolio(ctx);
       }
 
-      case 'get_predictions': {
-        const limit = Math.max(Number(toolInput.limit ?? 20), 1);
-        const status = String(toolInput.status ?? 'all');
-        return getPredictions(limit, status);
+      case 'get_positions': {
+        try {
+          const data = await loadPerpPositions(ctx);
+          return { success: true, data };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          return { success: false, error: message };
+        }
       }
 
       case 'get_open_orders': {
@@ -209,25 +705,6 @@ export async function executeToolCall(
           const message = error instanceof Error ? error.message : 'Unknown error';
           return { success: false, error: message };
         }
-      }
-
-      case 'get_order_book': {
-        const marketId = String(toolInput.market_id ?? '').trim();
-        const depth = Math.min(Math.max(Number(toolInput.depth ?? 5), 1), 20);
-        if (!marketId) {
-          return { success: false, error: 'Missing market_id' };
-        }
-        return getOrderBook(ctx, marketId, depth);
-      }
-
-      case 'price_history': {
-        const marketId = String(toolInput.market_id ?? '').trim();
-        const interval = String(toolInput.interval ?? '1d');
-        const limit = Math.min(Math.max(Number(toolInput.limit ?? 30), 1), 365);
-        if (!marketId) {
-          return { success: false, error: 'Missing market_id' };
-        }
-        return getPriceHistory(ctx, marketId, interval, limit);
       }
 
       case 'web_fetch': {
@@ -247,120 +724,7 @@ export async function executeToolCall(
         return fetchResult;
       }
 
-      case 'place_bet': {
-        const marketId = String(toolInput.market_id ?? '').trim();
-        const outcome = String(toolInput.outcome ?? '').toUpperCase() as 'YES' | 'NO';
-        const amount = Number(toolInput.amount ?? 0);
-        const reasoning = String(toolInput.reasoning ?? '');
-
-        if (!marketId) {
-          return { success: false, error: 'Missing market_id' };
-        }
-        if (outcome !== 'YES' && outcome !== 'NO') {
-          return { success: false, error: 'Outcome must be YES or NO' };
-        }
-        if (amount <= 0) {
-          return { success: false, error: 'Amount must be positive' };
-        }
-        if (!ctx.executor) {
-          return { success: false, error: 'Trading is not enabled (no executor configured)' };
-        }
-        if (!ctx.limiter) {
-          return { success: false, error: 'Trading is not enabled (no spending limiter configured)' };
-        }
-
-        // Fetch market details
-        let market: Market;
-        try {
-          market = await ctx.marketClient.getMarket(marketId);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Unknown error';
-          return { success: false, error: `Failed to fetch market: ${message}` };
-        }
-
-        // Check exposure limits
-        const exposureCheck = checkExposureLimits({
-          config: ctx.config,
-          market,
-          outcome,
-          amount,
-          side: 'buy',
-        });
-        if (!exposureCheck.allowed) {
-          return {
-            success: false,
-            error: `Trade blocked: ${exposureCheck.reason ?? 'exposure limit exceeded'}`,
-          };
-        }
-
-        // Check spending limits
-        const limitCheck = await ctx.limiter.checkAndReserve(amount);
-        if (!limitCheck.allowed) {
-          return {
-            success: false,
-            error: `Trade blocked: ${limitCheck.reason ?? 'spending limit exceeded'}`,
-          };
-        }
-
-        // Build trade decision
-        const decision: TradeDecision = {
-          action: 'buy',
-          outcome,
-          amount,
-          confidence: 'medium',
-          reasoning: reasoning || 'Placed via place_bet tool',
-        };
-
-        // Execute the trade
-        const result = await ctx.executor.execute(market, decision);
-
-        if (result.executed) {
-          // Confirm the spending
-          ctx.limiter.confirm(amount);
-
-          // Record prediction for calibration tracking
-          const yesPrice =
-            market.prices?.['Yes'] ??
-            market.prices?.['YES'] ??
-            (Array.isArray(market.prices) ? market.prices[0] : null) ??
-            0.5;
-          const price = outcome === 'YES' ? yesPrice : 1 - yesPrice;
-
-          const predictionId = createPrediction({
-            marketId: market.id,
-            marketTitle: market.question ?? marketId,
-            predictedOutcome: outcome,
-            predictedProbability: typeof price === 'number' ? price : 0.5,
-            confidenceLevel: 'medium',
-            reasoning: reasoning || 'Placed via place_bet tool',
-            domain: market.category ?? undefined,
-            executed: true,
-            executionPrice: typeof price === 'number' ? price : 0.5,
-            positionSize: amount,
-          });
-
-          return {
-            success: true,
-            data: {
-              executed: true,
-              market_id: market.id,
-              market_title: market.question,
-              outcome,
-              amount,
-              prediction_id: predictionId,
-              message: result.message,
-            },
-          };
-        } else {
-          // Release the reserved amount
-          ctx.limiter.release(amount);
-          return {
-            success: false,
-            error: result.message || 'Trade execution failed',
-          };
-        }
-      }
-
+      
       case 'qmd_query': {
         return qmdQuery(toolInput, ctx);
       }
@@ -442,6 +806,10 @@ function formatMarketsForTool(markets: Market[]): object[] {
     no_price: normalizePrice(market, 'No'),
     volume: market.volume ?? null,
     category: market.category ?? null,
+    symbol: market.symbol ?? null,
+    mark_price: market.markPrice ?? null,
+    kind: market.kind ?? null,
+    platform: market.platform ?? null,
   }));
 }
 
@@ -457,6 +825,10 @@ function formatMarketForTool(market: Market): object {
     category: market.category ?? null,
     end_date: market.endDate ?? null,
     resolved: market.resolved ?? false,
+    symbol: market.symbol ?? null,
+    mark_price: market.markPrice ?? null,
+    kind: market.kind ?? null,
+    platform: market.platform ?? null,
   };
 }
 
@@ -473,6 +845,18 @@ function formatIntelForTool(items: StoredIntel[]): object[] {
 
 function getWalletInfo(ctx: ToolExecutorContext): ToolResult {
   try {
+    if (ctx.config.execution?.provider === 'hyperliquid') {
+      return {
+        success: true,
+        data: {
+          address: ctx.config.hyperliquid?.accountAddress ?? null,
+          chain: 'hyperliquid',
+          token: 'USDC',
+          rpc_url: ctx.config.hyperliquid?.baseUrl ?? null,
+          keystore_path: null,
+        },
+      };
+    }
     const keystorePath =
       ctx.config.wallet?.keystorePath ??
       process.env.THUFIR_KEYSTORE_PATH ??
@@ -488,9 +872,8 @@ function getWalletInfo(ctx: ToolExecutorContext): ToolResult {
       success: true,
       data: {
         address,
-        chain: 'polygon',
-        token: 'USDC',
-        rpc_url: ctx.config.augur?.rpcUrl ?? null,
+        chain: null,
+        token: null,
         keystore_path: keystorePath,
       },
     };
@@ -502,67 +885,6 @@ function getWalletInfo(ctx: ToolExecutorContext): ToolResult {
 
 async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
   try {
-    const positionRows = await Promise.all(
-      listOpenPositions(50).map(async (position) => {
-        const outcome = (position.predictedOutcome ?? 'YES').toUpperCase();
-        let currentPrice = resolveCurrentPrice(position);
-
-        if (currentPrice == null) {
-          try {
-            const market = await ctx.marketClient.getMarket(position.marketId);
-            currentPrice =
-              market.prices?.[outcome] ??
-              market.prices?.[outcome.toUpperCase()] ??
-              (Array.isArray(market.prices)
-                ? outcome === 'YES'
-                  ? market.prices[0]
-                  : market.prices[1]
-                : null) ??
-              null;
-          } catch {
-            currentPrice = null;
-          }
-        }
-
-        const executionPrice = position.executionPrice ?? null;
-        const positionSize = position.positionSize ?? 0;
-        const shares =
-          executionPrice && executionPrice > 0 ? positionSize / executionPrice : null;
-        const currentValue =
-          shares != null && currentPrice != null ? shares * currentPrice : null;
-        const costBasis = positionSize;
-        const unrealizedPnl =
-          currentValue != null ? currentValue - costBasis : null;
-
-        return {
-          market_id: position.marketId,
-          market_question: position.marketTitle,
-          outcome,
-          shares,
-          avg_price: executionPrice,
-          current_price: currentPrice,
-          cost_basis: costBasis,
-          current_value: currentValue,
-          unrealized_pnl: unrealizedPnl,
-          pnl_percent:
-            executionPrice && currentPrice != null
-              ? `${(((currentPrice - executionPrice) / executionPrice) * 100).toFixed(1)}%`
-              : null,
-        };
-      })
-    );
-
-    const totals = positionRows.reduce(
-      (acc, position) => {
-        acc.totalCost += position.cost_basis ?? 0;
-        if (position.current_value != null) {
-          acc.totalValue += position.current_value;
-        }
-        return acc;
-      },
-      { totalCost: 0, totalValue: 0 }
-    );
-
     const balances = await getBalances(ctx);
     const limiterState = ctx.limiter?.getState?.();
     const dailyLimit = ctx.config.wallet?.limits?.daily ?? 100;
@@ -570,25 +892,39 @@ async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
       limiterState != null
         ? Math.max(0, dailyLimit - limiterState.todaySpent - limiterState.reserved)
         : null;
-
-    const augurPositions = await getAugurPositions(ctx);
+    const hasHyperliquid =
+      Boolean(ctx.config.hyperliquid?.enabled) ||
+      Boolean(ctx.config.hyperliquid?.accountAddress) ||
+      Boolean(ctx.config.hyperliquid?.privateKey) ||
+      Boolean(process.env.HYPERLIQUID_ACCOUNT_ADDRESS) ||
+      Boolean(process.env.HYPERLIQUID_PRIVATE_KEY);
+    let perpPositions: {
+      positions: Array<Record<string, unknown>>;
+      summary: Record<string, unknown>;
+    } | null = null;
+    let perpError: string | null = null;
+    if (hasHyperliquid) {
+      try {
+        perpPositions = await loadPerpPositions(ctx);
+      } catch (error) {
+        perpError = error instanceof Error ? error.message : 'Unknown error';
+      }
+    }
 
     return {
       success: true,
       data: {
         balances,
-        positions: positionRows,
-        augur_positions: augurPositions,
+        positions: [],
         summary: {
-          total_positions: positionRows.length,
-          total_value: totals.totalValue,
-          total_cost: totals.totalCost,
-          unrealized_pnl: totals.totalValue - totals.totalCost,
           available_balance: balances.usdc ?? 0,
           remaining_daily_limit: remainingDaily,
-          positions_source: 'local',
-          augur_positions_count: augurPositions.length,
+          positions_source: 'none',
+          perp_enabled: hasHyperliquid,
         },
+        perp_positions: perpPositions?.positions ?? [],
+        perp_summary: perpPositions?.summary ?? null,
+        perp_error: perpError,
       },
     };
   } catch (error) {
@@ -597,85 +933,329 @@ async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
   }
 }
 
-async function getAugurPositions(
+async function loadPerpPositions(
   ctx: ToolExecutorContext
-): Promise<
-  Array<{
-    market_id: string;
-    outcome: string;
-    shares: string;
-    avg_price: number;
-    cost_basis: number;
-    open: boolean;
-  }>
-> {
-  try {
-    if (typeof (ctx.marketClient as { getPositions?: unknown }).getPositions !== 'function') {
-      return [];
-    }
+): Promise<{
+  positions: Array<{
+    symbol: string;
+    side: string;
+    size: number;
+    entry_price: number | null;
+    position_value: number | null;
+    unrealized_pnl: number | null;
+    return_on_equity: number | null;
+    liquidation_price: number | null;
+    margin_used: number | null;
+    leverage_type: string | null;
+    leverage: number | null;
+    max_leverage: number | null;
+  }>;
+  summary: {
+    account_value: number | null;
+    total_notional: number | null;
+    total_margin_used: number | null;
+    cross_account_value: number | null;
+    cross_total_notional: number | null;
+    cross_total_margin_used: number | null;
+    cross_maintenance_margin_used: number | null;
+    withdrawable: number | null;
+  };
+}> {
+  const client = new HyperliquidClient(ctx.config);
+  const state = (await client.getClearinghouseState()) as {
+    assetPositions?: Array<{ position?: Record<string, unknown> }>;
+    marginSummary?: Record<string, unknown>;
+    crossMarginSummary?: Record<string, unknown>;
+    withdrawable?: string | number;
+    crossMaintenanceMarginUsed?: string | number;
+  };
 
-    const keystorePath =
-      ctx.config.wallet?.keystorePath ??
-      process.env.THUFIR_KEYSTORE_PATH ??
-      `${process.env.HOME ?? ''}/.thufir/keystore.json`;
-    const store = loadKeystore(keystorePath);
-    const address = store.address
-      ? store.address.startsWith('0x')
-        ? store.address
-        : `0x${store.address}`
-      : null;
+  const toNumber = (value: unknown): number | null => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
 
-    if (!address) {
-      return [];
-    }
+  const positions = (state.assetPositions ?? [])
+    .map((entry) => entry?.position ?? {})
+    .map((position) => {
+      const size = toNumber((position as { szi?: unknown }).szi);
+      if (size == null || size === 0) return null;
+      const side = size > 0 ? 'long' : 'short';
+      const leverage = (position as { leverage?: { type?: string; value?: number | string } })
+        .leverage;
+      const leverageValue = toNumber(leverage?.value);
+      return {
+        symbol: String((position as { coin?: unknown }).coin ?? ''),
+        side,
+        size: Math.abs(size),
+        entry_price: toNumber((position as { entryPx?: unknown }).entryPx),
+        position_value: toNumber((position as { positionValue?: unknown }).positionValue),
+        unrealized_pnl: toNumber((position as { unrealizedPnl?: unknown }).unrealizedPnl),
+        return_on_equity: toNumber((position as { returnOnEquity?: unknown }).returnOnEquity),
+        liquidation_price: toNumber((position as { liquidationPx?: unknown }).liquidationPx),
+        margin_used: toNumber((position as { marginUsed?: unknown }).marginUsed),
+        leverage_type: leverage?.type ?? null,
+        leverage: leverageValue,
+        max_leverage: toNumber((position as { maxLeverage?: unknown }).maxLeverage),
+      };
+    })
+    .filter((position): position is NonNullable<typeof position> => Boolean(position));
 
-    const positions = await (ctx.marketClient as {
-      getPositions: (addr: string) => Promise<
-        Array<{
-          marketId: string;
-          outcome: string;
-          shares: string;
-          avgPrice: number;
-          costBasis: number;
-          open: boolean;
-        }>
-      >;
-    }).getPositions(address);
-
-    return positions.map((pos) => ({
-      market_id: pos.marketId,
-      outcome: pos.outcome,
-      shares: pos.shares,
-      avg_price: pos.avgPrice,
-      cost_basis: pos.costBasis,
-      open: pos.open,
-    }));
-  } catch {
-    return [];
-  }
+  const marginSummary = state.marginSummary ?? {};
+  const crossSummary = state.crossMarginSummary ?? {};
+  return {
+    positions,
+    summary: {
+      account_value: toNumber((marginSummary as { accountValue?: unknown }).accountValue),
+      total_notional: toNumber((marginSummary as { totalNtlPos?: unknown }).totalNtlPos),
+      total_margin_used: toNumber(
+        (marginSummary as { totalMarginUsed?: unknown }).totalMarginUsed
+      ),
+      cross_account_value: toNumber((crossSummary as { accountValue?: unknown }).accountValue),
+      cross_total_notional: toNumber((crossSummary as { totalNtlPos?: unknown }).totalNtlPos),
+      cross_total_margin_used: toNumber(
+        (crossSummary as { totalMarginUsed?: unknown }).totalMarginUsed
+      ),
+      cross_maintenance_margin_used: toNumber(state.crossMaintenanceMarginUsed),
+      withdrawable: toNumber(state.withdrawable),
+    },
+  };
 }
 
-function resolveCurrentPrice(position: {
-  currentPrices?: Record<string, unknown> | number[] | null;
-  predictedOutcome?: string;
-}): number | null {
-  const currentPrices = position.currentPrices ?? undefined;
-  if (!currentPrices) return null;
-  const outcome = (position.predictedOutcome ?? 'YES').toUpperCase();
+function formatSignalSymbol(symbol: string): string {
+  if (!symbol) return symbol;
+  if (symbol.includes('/')) return symbol;
+  return `${symbol}/USDT`;
+}
 
-  // Handle array format [yesPrice, noPrice]
-  if (Array.isArray(currentPrices)) {
-    const index = outcome === 'YES' ? 0 : 1;
-    const value = currentPrices[index];
-    return typeof value === 'number' ? value : null;
+function biasToScore(bias?: string | null): number {
+  if (!bias) return 0;
+  if (bias === 'up') return 1;
+  if (bias === 'down') return -1;
+  return 0;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+async function analyzePerpMarket(
+  ctx: ToolExecutorContext,
+  symbol: string,
+  horizon?: string,
+  probabilityMode?: string
+): Promise<Record<string, unknown>> {
+  const market = await ctx.marketClient.getMarket(symbol);
+  const baseSymbol = market.symbol ?? market.id;
+  const signalSymbol = formatSignalSymbol(baseSymbol);
+
+  const [priceVol, funding, orderflow] = await Promise.all([
+    signalPriceVolRegime(ctx.config, signalSymbol),
+    signalHyperliquidFundingOISkew(ctx.config, signalSymbol),
+    signalHyperliquidOrderflowImbalance(ctx.config, signalSymbol),
+  ]);
+
+  const signals = [priceVol, funding, orderflow].filter(Boolean) as Array<{
+    kind: string;
+    directionalBias: string;
+    confidence: number;
+    metrics?: Record<string, unknown>;
+  }>;
+
+  const biasScore = signals.reduce(
+    (acc, s) => acc + biasToScore(s.directionalBias) * (s.confidence ?? 0),
+    0
+  );
+  const avgConfidence = signals.length
+    ? signals.reduce((acc, s) => acc + (s.confidence ?? 0), 0) / signals.length
+    : 0;
+  const mode = probabilityMode?.toLowerCase() ?? 'balanced';
+  const [capLow, capHigh] =
+    mode === 'conservative'
+      ? [0.35, 0.65]
+      : mode === 'aggressive'
+        ? [0.1, 0.9]
+        : [0.2, 0.8];
+  const probUp =
+    signals.length === 0 ? 0.5 : clamp(0.5 + biasScore * 0.15, capLow, capHigh);
+  const direction =
+    probUp > 0.55 ? 'up' : probUp < 0.45 ? 'down' : 'neutral';
+
+  const risks: string[] = [];
+  if (signals.length === 0) {
+    risks.push('No signal data available for this symbol.');
+  }
+  if (avgConfidence < 0.25) {
+    risks.push('Low signal confidence; consider smaller sizing.');
+  }
+  if (!market.markPrice) {
+    risks.push('Missing mark price; verify market data.');
   }
 
-  // Handle record format { YES: price, NO: price }
-  const direct = currentPrices[outcome] ?? currentPrices[outcome.toLowerCase()];
-  if (typeof direct === 'number') {
-    return direct;
+  return {
+    symbol: baseSymbol,
+    horizon: horizon ?? 'hours',
+    mark_price: market.markPrice ?? null,
+    max_leverage: market.metadata?.maxLeverage ?? null,
+    probability_mode: mode,
+    direction,
+    prob_up: Number(probUp.toFixed(2)),
+    confidence: Number(avgConfidence.toFixed(2)),
+    signals: signals.map((s) => ({
+      kind: s.kind,
+      bias: s.directionalBias,
+      confidence: s.confidence,
+      metrics: s.metrics ?? null,
+    })),
+    risks,
+  };
+}
+
+async function analyzePositions(
+  ctx: ToolExecutorContext,
+  minLiqBufferPct: number,
+  maxConcentrationPct: number,
+  leverageWarning: number
+): Promise<Record<string, unknown>> {
+  const data = await loadPerpPositions(ctx);
+  const positions = data.positions ?? [];
+  const enriched = await Promise.all(
+    positions.map(async (pos) => {
+      const symbol = pos.symbol;
+      let markPrice: number | null = null;
+      try {
+        const market = await ctx.marketClient.getMarket(symbol);
+        markPrice = market.markPrice ?? null;
+      } catch {
+        markPrice = null;
+      }
+      const liq = pos.liquidation_price ?? null;
+      const side = pos.side ?? 'long';
+      let bufferPct: number | null = null;
+      if (markPrice != null && liq != null) {
+        const distance = side === 'long' ? markPrice - liq : liq - markPrice;
+        bufferPct = markPrice > 0 ? (distance / markPrice) * 100 : null;
+      }
+      const notional =
+        pos.position_value ??
+        (markPrice != null ? Math.abs(pos.size) * markPrice : null);
+      const leverageFlag =
+        typeof pos.leverage === 'number' && pos.leverage > leverageWarning;
+      return {
+        ...pos,
+        mark_price: markPrice,
+        notional,
+        liq_buffer_pct: bufferPct,
+        liq_risk: bufferPct != null && bufferPct < minLiqBufferPct,
+        leverage_warning: leverageFlag,
+      };
+    })
+  );
+
+  const totalNotional = enriched.reduce((sum, p) => sum + (p.notional ?? 0), 0);
+  const concentration = enriched
+    .map((p) => ({
+      symbol: p.symbol,
+      share: totalNotional > 0 ? (p.notional ?? 0) / totalNotional : 0,
+    }))
+    .sort((a, b) => b.share - a.share);
+
+  const warnings: string[] = [];
+  for (const p of enriched) {
+    if (p.liq_risk) {
+      warnings.push(`${p.symbol}: liquidation buffer ${p.liq_buffer_pct?.toFixed(1)}%`);
+    }
+    if (p.leverage_warning) {
+      warnings.push(`${p.symbol}: leverage ${p.leverage}x exceeds ${leverageWarning}x`);
+    }
   }
-  return null;
+  if ((concentration[0]?.share ?? 0) * 100 > maxConcentrationPct) {
+    warnings.push(
+      `Concentration risk: ${concentration[0]!.symbol} at ${(concentration[0]!.share * 100).toFixed(
+        1
+      )}%`
+    );
+  }
+
+  return {
+    summary: {
+      total_positions: enriched.length,
+      total_notional: totalNotional,
+      max_concentration: concentration[0]?.share ?? 0,
+      min_liq_buffer_pct: minLiqBufferPct,
+      max_concentration_pct: maxConcentrationPct,
+      leverage_warning: leverageWarning,
+    },
+    concentration,
+    warnings,
+    positions: enriched,
+  };
+}
+
+async function buildDiscoveryReport(
+  config: ThufirConfig,
+  limit: number
+): Promise<Record<string, unknown>> {
+  const result = await runDiscovery(config);
+  const expressions = result.expressions.slice(0, limit);
+  return {
+    clusters: result.clusters.map((cluster) => ({
+      symbol: cluster.symbol,
+      bias: cluster.directionalBias,
+      confidence: cluster.confidence,
+      time_horizon: cluster.timeHorizon,
+      signals: cluster.signals.map((s) => s.kind),
+    })),
+    hypotheses: result.hypotheses.slice(0, limit),
+    expressions,
+  };
+}
+
+async function buildTradeReview(
+  ctx: ToolExecutorContext,
+  symbol?: string,
+  limit = 20
+): Promise<Record<string, unknown>> {
+  const trades = listPerpTrades({ symbol, limit });
+  const reviewed = await Promise.all(
+    trades.map(async (trade) => {
+      let markPrice: number | null = null;
+      try {
+        const market = await ctx.marketClient.getMarket(trade.symbol);
+        markPrice = market.markPrice ?? null;
+      } catch {
+        markPrice = null;
+      }
+      const entry = trade.price ?? null;
+      let unrealizedPnl: number | null = null;
+      if (entry != null && markPrice != null) {
+        const delta = trade.side === 'buy' ? markPrice - entry : entry - markPrice;
+        unrealizedPnl = delta * trade.size;
+      }
+      return {
+        id: trade.id,
+        created_at: trade.createdAt,
+        symbol: trade.symbol,
+        side: trade.side,
+        size: trade.size,
+        entry_price: entry,
+        mark_price: markPrice,
+        leverage: trade.leverage ?? null,
+        order_type: trade.orderType ?? null,
+        status: trade.status ?? null,
+        unrealized_pnl: unrealizedPnl,
+      };
+    })
+  );
+
+  const totalPnl = reviewed.reduce((sum, t) => sum + (t.unrealized_pnl ?? 0), 0);
+
+  return {
+    count: reviewed.length,
+    total_unrealized_pnl: totalPnl,
+    trades: reviewed,
+    note: 'Unrealized PnL uses current mark price; realized PnL not tracked yet.',
+  };
 }
 
 async function getBalances(ctx: ToolExecutorContext): Promise<{
@@ -701,170 +1281,6 @@ async function getBalances(ctx: ToolExecutorContext): Promise<{
     return { usdc: balances.usdc ?? 0, matic: balances.matic ?? 0, source: 'chain' };
   } catch {
     return { usdc: getCashBalance(), matic: 0, source: 'memory' };
-  }
-}
-
-function getPredictions(limit: number, status: string): ToolResult {
-  const fetchLimit = Math.max(limit, 50);
-  const predictions = listPredictions({ limit: fetchLimit });
-
-  const normalizedStatus = status.toLowerCase();
-  const filtered = predictions.filter((prediction) => {
-    const resolved = prediction.outcome != null;
-    const correct =
-      resolved &&
-      prediction.predictedOutcome != null &&
-      prediction.predictedOutcome.toUpperCase() === prediction.outcome?.toUpperCase();
-
-    switch (normalizedStatus) {
-      case 'pending':
-        return !resolved;
-      case 'resolved':
-        return resolved;
-      case 'won':
-        return Boolean(correct);
-      case 'lost':
-        return resolved && !correct;
-      case 'all':
-      default:
-        return true;
-    }
-  });
-
-  const sliced = filtered.slice(0, limit);
-  const resolved = sliced.filter((prediction) => prediction.outcome != null);
-  const wins = resolved.filter(
-    (prediction) =>
-      prediction.predictedOutcome != null &&
-      prediction.outcome != null &&
-      prediction.predictedOutcome.toUpperCase() === prediction.outcome.toUpperCase()
-  );
-  const losses = resolved.filter(
-    (prediction) =>
-      prediction.predictedOutcome != null &&
-      prediction.outcome != null &&
-      prediction.predictedOutcome.toUpperCase() !== prediction.outcome.toUpperCase()
-  );
-
-  const totalBet = sliced.reduce((sum, prediction) => {
-    return sum + (prediction.positionSize ?? 0);
-  }, 0);
-  const totalReturn = resolved.reduce((sum, prediction) => {
-    if (
-      prediction.positionSize &&
-      prediction.executionPrice &&
-      prediction.executionPrice > 0 &&
-      prediction.predictedOutcome &&
-      prediction.outcome &&
-      prediction.predictedOutcome.toUpperCase() === prediction.outcome.toUpperCase()
-    ) {
-      return sum + prediction.positionSize / prediction.executionPrice;
-    }
-    return sum;
-  }, 0);
-
-  return {
-    success: true,
-    data: {
-      predictions: sliced.map((prediction) => ({
-        id: prediction.id,
-        market: prediction.marketTitle,
-        outcome: prediction.predictedOutcome ?? null,
-        amount: prediction.positionSize ?? null,
-        entry_price: prediction.executionPrice ?? null,
-        reasoning: prediction.reasoning ?? null,
-        timestamp: prediction.createdAt,
-        resolved: prediction.outcome != null,
-        correct:
-          prediction.outcome != null &&
-          prediction.predictedOutcome != null &&
-          prediction.predictedOutcome.toUpperCase() === prediction.outcome.toUpperCase(),
-        resolution: prediction.outcome ?? null,
-      })),
-      stats: {
-        total: sliced.length,
-        pending: sliced.length - resolved.length,
-        resolved: resolved.length,
-        wins: wins.length,
-        losses: losses.length,
-        win_rate:
-          resolved.length > 0
-            ? `${((wins.length / resolved.length) * 100).toFixed(1)}%`
-            : 'N/A',
-        total_bet: totalBet,
-        total_return: totalReturn,
-        roi:
-          totalBet > 0 ? `${(((totalReturn - totalBet) / totalBet) * 100).toFixed(1)}%` : 'N/A',
-      },
-    },
-  };
-}
-
-async function getOrderBook(
-  ctx: ToolExecutorContext,
-  marketId: string,
-  depth: number
-): Promise<ToolResult> {
-  try {
-    const market = await ctx.marketClient.getMarket(marketId);
-    const yesPrice = market.prices?.YES ?? market.prices?.Yes ?? 0.5;
-    const noPrice = market.prices?.NO ?? market.prices?.No ?? 0.5;
-    return {
-      success: true,
-      data: {
-        market_id: marketId,
-        question: market.question,
-        yes: {
-          best_bid: yesPrice,
-          best_ask: yesPrice,
-          spread: 0,
-          bids: Array.from({ length: depth }, () => ({ price: yesPrice, size: 0 })),
-          asks: Array.from({ length: depth }, () => ({ price: yesPrice, size: 0 })),
-        },
-        no: {
-          best_bid: noPrice,
-          best_ask: noPrice,
-          spread: 0,
-          bids: Array.from({ length: depth }, () => ({ price: noPrice, size: 0 })),
-          asks: Array.from({ length: depth }, () => ({ price: noPrice, size: 0 })),
-        },
-        liquidity_warning: 'Augur AMM markets do not provide order book depth; values are indicative only.',
-      },
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return { success: false, error: message };
-  }
-}
-
-async function getPriceHistory(
-  ctx: ToolExecutorContext,
-  marketId: string,
-  interval: string,
-  limit: number
-): Promise<ToolResult> {
-  try {
-    const market = await ctx.marketClient.getMarket(marketId);
-    const series = [
-      {
-        timestamp: market.endDate?.toISOString() ?? new Date().toISOString(),
-        prices: market.prices,
-        interval,
-      },
-    ];
-    return {
-      success: true,
-      data: {
-        market_id: marketId,
-        interval,
-        limit,
-        series,
-        note: 'Augur Turbo does not provide order-book price history; returning latest snapshot only.',
-      },
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    return { success: false, error: message };
   }
 }
 
@@ -1081,6 +1497,103 @@ async function searchWebViaBrave(
     }));
 
     return { success: true, data: { query, provider: 'brave', results } };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unknown error';
+    return { success: false, error: message };
+  }
+}
+
+type DuckDuckGoTopic = {
+  Text?: string;
+  FirstURL?: string;
+  Result?: string;
+  Name?: string;
+  Topics?: DuckDuckGoTopic[];
+};
+
+function flattenDuckDuckGoTopics(topics: DuckDuckGoTopic[]): DuckDuckGoTopic[] {
+  const result: DuckDuckGoTopic[] = [];
+  for (const topic of topics) {
+    if (Array.isArray(topic.Topics) && topic.Topics.length > 0) {
+      result.push(...flattenDuckDuckGoTopics(topic.Topics));
+      continue;
+    }
+    result.push(topic);
+  }
+  return result;
+}
+
+async function searchWebViaDuckDuckGo(
+  query: string,
+  limit: number
+): Promise<ToolResult> {
+  try {
+    const url = new URL('https://api.duckduckgo.com/');
+    url.searchParams.set('q', query);
+    url.searchParams.set('format', 'json');
+    url.searchParams.set('no_redirect', '1');
+    url.searchParams.set('no_html', '1');
+    url.searchParams.set('skip_disambig', '1');
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        Accept: 'application/json',
+      },
+    });
+    if (!response.ok) {
+      return { success: false, error: `DuckDuckGo: ${response.status}` };
+    }
+
+    const data = (await response.json()) as {
+      AbstractText?: string;
+      AbstractURL?: string;
+      Heading?: string;
+      RelatedTopics?: DuckDuckGoTopic[];
+    };
+
+    const results: Array<{
+      title: string;
+      url: string;
+      snippet: string;
+      date: null;
+      source: string;
+    }> = [];
+
+    if (data.AbstractURL && data.AbstractText) {
+      results.push({
+        title: data.Heading?.trim() || query,
+        url: data.AbstractURL,
+        snippet: data.AbstractText,
+        date: null,
+        source: 'duckduckgo',
+      });
+    }
+
+    const flat = flattenDuckDuckGoTopics(data.RelatedTopics ?? []);
+    for (const topic of flat) {
+      if (results.length >= limit) {
+        break;
+      }
+      const text = (topic.Text ?? '').trim();
+      const link = (topic.FirstURL ?? '').trim();
+      if (!text || !link) {
+        continue;
+      }
+      const title = text.split(' - ')[0]?.trim() || text.slice(0, 80);
+      results.push({
+        title,
+        url: link,
+        snippet: text,
+        date: null,
+        source: 'duckduckgo',
+      });
+    }
+
+    const trimmed = results.slice(0, limit);
+    if (trimmed.length === 0) {
+      return { success: false, error: 'DuckDuckGo returned no results' };
+    }
+    return { success: true, data: { query, provider: 'duckduckgo', results: trimmed } };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     return { success: false, error: message };

@@ -11,11 +11,10 @@ const execAsync = promisify(exec);
 import { Logger } from '../core/logger.js';
 import { TelegramAdapter } from '../interface/telegram.js';
 import { WhatsAppAdapter } from '../interface/whatsapp.js';
-import { resolveOutcomes } from '../core/resolver.js';
 import { runIntelPipelineDetailed } from '../intel/pipeline.js';
 import { pruneChatMessages } from '../memory/chat.js';
 import { listWatchlist } from '../memory/watchlist.js';
-import { AugurMarketClient } from '../execution/augur/markets.js';
+import { createMarketClient } from '../execution/market-client.js';
 import { pruneIntel } from '../intel/store.js';
 import { rankIntelAlerts } from '../intel/alerts.js';
 import { refreshMarketPrices, syncMarketCache } from '../core/markets_sync.js';
@@ -46,7 +45,7 @@ for (const instance of agentRegistry.agents.values()) {
   instance.start();
 }
 
-// Augur Turbo does not provide a websocket market stream; cache is refreshed on schedule.
+// Market cache is refreshed on schedule (no websocket stream configured).
 
 const onIncoming = async (
   message: {
@@ -134,33 +133,6 @@ if (briefingConfig?.enabled) {
       }
     }
     lastBriefingDate = today;
-  }, 60_000);
-}
-
-const resolverConfig = config.notifications?.resolver;
-let lastResolverDate = '';
-if (resolverConfig?.enabled) {
-  setInterval(async () => {
-    const now = new Date();
-    const [hours, minutes] = resolverConfig.time.split(':').map((part) => Number(part));
-    if (Number.isNaN(hours) || Number.isNaN(minutes)) {
-      return;
-    }
-    const today = now.toISOString().split('T')[0]!;
-    if (lastResolverDate === today) {
-      return;
-    }
-    if (now.getHours() !== hours || now.getMinutes() !== minutes) {
-      return;
-    }
-
-    try {
-      const updated = await resolveOutcomes(config, resolverConfig.limit);
-      logger.info(`Resolved ${updated} prediction(s).`);
-    } catch (error) {
-      logger.error('Outcome resolver failed', error);
-    }
-    lastResolverDate = today;
   }, 60_000);
 }
 
@@ -262,10 +234,16 @@ if (proactiveConfig?.enabled && proactiveConfig.mode !== 'heartbeat') {
     try {
       const result = await runProactiveSearch(config, {
         maxQueries: proactiveConfig.maxQueries,
+        iterations: proactiveConfig.iterations,
         watchlistLimit: proactiveConfig.watchlistLimit,
         useLlm: proactiveConfig.useLlm,
         recentIntelLimit: proactiveConfig.recentIntelLimit,
         extraQueries: proactiveConfig.extraQueries,
+        includeLearnedQueries: proactiveConfig.includeLearnedQueries,
+        learnedQueryLimit: proactiveConfig.learnedQueryLimit,
+        webLimitPerQuery: proactiveConfig.webLimitPerQuery,
+        fetchPerQuery: proactiveConfig.fetchPerQuery,
+        fetchMaxChars: proactiveConfig.fetchMaxChars,
       });
       logger.info(`Proactive search stored ${result.storedCount} item(s).`);
 
@@ -340,10 +318,16 @@ if (heartbeatConfig?.enabled) {
       try {
         const result = await runProactiveSearch(config, {
           maxQueries: proactiveConfig.maxQueries,
+          iterations: proactiveConfig.iterations,
           watchlistLimit: proactiveConfig.watchlistLimit,
           useLlm: proactiveConfig.useLlm,
           recentIntelLimit: proactiveConfig.recentIntelLimit,
           extraQueries: proactiveConfig.extraQueries,
+          includeLearnedQueries: proactiveConfig.includeLearnedQueries,
+          learnedQueryLimit: proactiveConfig.learnedQueryLimit,
+          webLimitPerQuery: proactiveConfig.webLimitPerQuery,
+          fetchPerQuery: proactiveConfig.fetchPerQuery,
+          fetchMaxChars: proactiveConfig.fetchMaxChars,
         });
         const titles = result.storedItems
           .map((item) => item.title)
@@ -351,6 +335,10 @@ if (heartbeatConfig?.enabled) {
           .slice(0, 5);
         proactiveSummary = [
           `Proactive search stored ${result.storedCount} item(s).`,
+          `Rounds: ${result.rounds}`,
+          result.learnedSeedQueries.length > 0
+            ? `Learned seeds: ${result.learnedSeedQueries.slice(0, 5).join('; ')}`
+            : '',
           result.queries.length > 0 ? `Queries: ${result.queries.join('; ')}` : '',
           titles.length > 0 ? `Top items: ${titles.join(' | ')}` : '',
         ]
@@ -408,8 +396,11 @@ if (heartbeatConfig?.enabled) {
 const mentatConfig = config.notifications?.mentat;
 if (mentatConfig?.enabled) {
   const llm = createLlmClient(config);
-  const mentatMarketClient = new AugurMarketClient(config);
-  const schedules =
+  const mentatMarketClient = createMarketClient(config);
+  if (!mentatMarketClient.isAvailable()) {
+    logger.warn('Mentat notifications disabled: market client not configured.');
+  } else {
+    const schedules =
     mentatConfig.schedules && mentatConfig.schedules.length > 0
       ? mentatConfig.schedules
       : [
@@ -446,7 +437,7 @@ if (mentatConfig?.enabled) {
     const { generateMentatReport, formatMentatReport } = await import('../mentat/report.js');
     const { listFragilityCardDeltas } = await import('../memory/mentat.js');
 
-    const system = schedule.system ?? mentatConfig.system ?? 'Augur';
+    const system = schedule.system ?? mentatConfig.system ?? 'Markets';
     const marketQuery = schedule.marketQuery ?? mentatConfig.marketQuery;
     const marketLimit = schedule.marketLimit ?? mentatConfig.marketLimit;
     const intelLimit = schedule.intelLimit ?? mentatConfig.intelLimit;
@@ -457,6 +448,7 @@ if (mentatConfig?.enabled) {
     const scan = await runMentatScan({
       system,
       llm,
+      config,
       marketClient: mentatMarketClient,
       marketQuery,
       limit: marketLimit,
@@ -519,7 +511,7 @@ if (mentatConfig?.enabled) {
     lastMentatRunAtBySchedule.set(scheduleId, new Date().toISOString());
   };
 
-  for (const schedule of schedules) {
+    for (const schedule of schedules) {
     if (schedule.intervalMinutes && schedule.intervalMinutes > 0) {
       setInterval(() => {
         runMentatMonitor(schedule).catch((error) => logger.error('Mentat monitor failed', error));
@@ -547,6 +539,7 @@ if (mentatConfig?.enabled) {
       runMentatMonitor(schedule).catch((error) => logger.error('Mentat monitor failed', error));
       lastMentatDateBySchedule.set(scheduleId, today);
     }, 60_000);
+    }
   }
 }
 
@@ -634,7 +627,7 @@ if (telegram) {
   });
 }
 
-// Augur Turbo has no native market stream; rely on cache refresh schedules instead.
+// No native market stream configured; rely on cache refresh schedules instead.
 
 async function sendIntelAlerts(
   items: Array<{ title: string; url?: string; source: string; content?: string }>,
@@ -694,7 +687,10 @@ async function sendIntelAlerts(
     entityAliases: alertsConfig.entityAliases ?? {},
   };
 
-  const marketClient = new AugurMarketClient(config);
+  const marketClient = createMarketClient(config);
+  if (!marketClient.isAvailable()) {
+    return;
+  }
   let watchlistTitles: string[] = [];
 
   if (settings.watchlistOnly) {

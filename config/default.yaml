@@ -33,7 +33,7 @@ agent:
   maxToolResultChars: 8000
   internalPromptMode: minimal
   mentatAutoScan: false
-  mentatSystem: Augur
+  mentatSystem: Markets
   # Optional filters for mentat auto-scan
   # mentatMarketQuery: "macro"
   # mentatMarketLimit: 25
@@ -56,6 +56,14 @@ agent:
   # Trivial task offload (local LLM)
   trivialTaskProvider: local
   trivialTaskModel: qwen2.5:1.5b-instruct
+  # Controlled system-side-effect tools (install/exec)
+  systemTools:
+    enabled: false
+    allowedCommands: [node, npm, pnpm, bun, qmd]
+    allowedManagers: [pnpm, npm, bun]
+    allowGlobalInstall: false
+    timeoutMs: 120000
+    maxOutputChars: 12000
   trivial:
     enabled: true
     maxTokens: 256
@@ -74,6 +82,8 @@ agent:
 wallet:
   # Encrypted keystore location
   keystorePath: ~/.thufir/keystore.json
+  # Optional RPC URL for live execution adapters
+  # rpcUrl: ""
 
   # Spending limits (USD)
   limits:
@@ -86,27 +96,18 @@ wallet:
     maxPositionPercent: 20   # Max % of portfolio in one market
     maxDomainPercent: 40     # Max % in one domain
 
+  # Perp risk controls
+  perps:
+    maxLeverage: 5              # Max leverage allowed on perps
+    maxOrderNotionalUsd: 250    # Max notional per perp order (USD)
+    maxTotalNotionalUsd: 1000   # Max total perp notional across positions (USD)
+    minLiquidationDistanceBps: 500 # Minimum liquidation distance (bps) when data available
+    correlationCaps: []         # Optional: [{ name, symbols, maxNotionalUsd }]
+
   # Loss protection
   cooldown:
     lossThresholdPercent: 10  # Trigger at 10% daily loss
     durationSeconds: 3600     # 1 hour cooldown
-
-# Augur Turbo settings
-augur:
-  enabled: true
-  subgraph: https://api.thegraph.com/subgraphs/name/augurproject/augur-turbo-matic
-  rpcUrl: https://polygon-rpc.com
-  slippageTolerance: 0.02
-  marketTypes:
-    - crypto
-  stream:
-    enabled: false
-    wsUrl: ""            # optional WebSocket endpoint
-    watchlistOnly: true
-    maxWatchlist: 50
-    reconnectSeconds: 10
-    staleAfterSeconds: 180
-    refreshIntervalSeconds: 300
 
 # Technical analysis (short-term crypto)
 technical:
@@ -145,6 +146,7 @@ technical:
 execution:
   # paper = simulated trades, webhook = forward orders to external executor
   mode: paper
+  provider: hyperliquid
   webhookUrl: ""
 
 # Channel integrations
@@ -169,6 +171,8 @@ autonomy:
   watchlistOnly: true
   eventDriven: false
   eventDrivenMinItems: 1
+  strategy: discovery
+  probeRiskFraction: 0.005
 
   # Full autonomous mode (auto-executes trades)
   fullAuto: false              # Master toggle for auto-execution
@@ -222,10 +226,6 @@ notifications:
   dailyReport:
     enabled: false
     channels: []
-  resolver:
-    enabled: false
-    time: "02:00"
-    limit: 50
   intelFetch:
     enabled: false
     time: "06:00"
@@ -242,10 +242,16 @@ notifications:
     mode: schedule
     time: "07:30"
     maxQueries: 8
+    iterations: 2
     watchlistLimit: 20
     useLlm: true
     recentIntelLimit: 25
     extraQueries: []
+    includeLearnedQueries: true
+    learnedQueryLimit: 8
+    webLimitPerQuery: 5
+    fetchPerQuery: 1
+    fetchMaxChars: 4000
     channels: []
   heartbeat:
     enabled: false
@@ -284,7 +290,7 @@ notifications:
     time: "09:00"
     # intervalMinutes: 60
     channels: []
-    system: Augur
+    system: Hyperliquid
     # marketQuery: "macro"
     marketLimit: 25
     intelLimit: 40
@@ -307,7 +313,7 @@ qmd:
   knowledgePath: ~/.thufir/knowledge
   collections:
     - name: thufir-research
-      description: Web search results and articles for prediction market research
+      description: Web search results and articles for market research
     - name: thufir-intel
       description: News, social media intel, market commentary
     - name: thufir-markets
@@ -377,3 +383,13 @@ intel:
     allowTypes: []
     minTrust: medium
     socialOptIn: true
+# Hyperliquid settings
+hyperliquid:
+  enabled: true
+  baseUrl: https://api.hyperliquid.xyz
+  wsUrl: wss://api.hyperliquid.xyz/ws
+  accountAddress: ""
+  privateKey: ""
+  maxLeverage: 5
+  defaultSlippageBps: 10
+  symbols: ["BTC", "ETH"]
