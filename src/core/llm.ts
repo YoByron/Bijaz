@@ -431,8 +431,33 @@ export function createTrivialTaskClient(config: ThufirConfig): LlmClient | null 
       model,
       timeoutMs: trivialConfig.timeoutMs,
     });
+
+    // Prefer local for trivial tasks, but do not block interactive paths on slow local inference.
+    // If local cannot answer quickly, fall back to OpenAI for the same trivial task.
+    const localSoftTimeoutMs = 5_000;
+    const localDefaults: LlmClientOptions = {
+      temperature: defaults.temperature,
+      timeoutMs:
+        typeof defaults.timeoutMs === 'number'
+          ? Math.min(defaults.timeoutMs, localSoftTimeoutMs)
+          : localSoftTimeoutMs,
+      maxTokens:
+        typeof defaults.maxTokens === 'number'
+          ? Math.min(defaults.maxTokens, 96)
+          : 96,
+    };
+
+    const primary = new TrivialTaskClient(guarded, localDefaults);
+    const fallback = new TrivialTaskClient(
+      new OpenAiClient(config, config.agent.openaiModel ?? config.agent.model, 'trivial'),
+      defaults
+    );
+
     return wrapWithLimiter(
-      wrapWithInfra(new TrivialTaskClient(guarded, defaults), config)
+      wrapWithInfra(
+        new FallbackLlmClient(primary, fallback, () => true, config),
+        config
+      )
     );
   }
   if (provider === 'anthropic') {
@@ -1404,43 +1429,6 @@ class LocalClient implements LlmClient {
           messages: localMessages,
         }),
       });
-    } catch (error) {
-      // Local trivial calls can be slow on cold-start. Retry once with a longer timeout.
-      if (
-        this.meta?.kind === 'trivial' &&
-        timeoutMs &&
-        timeoutMs > 0 &&
-        timeoutMs < 120_000 &&
-        error instanceof Error &&
-        (error.name === 'AbortError' || String((error as any).type ?? '') === 'aborted')
-      ) {
-        const retryController =
-          typeof AbortController !== 'undefined' ? new AbortController() : null;
-        const retryTimeoutMs = Math.min(120_000, timeoutMs * 4);
-        let retryTimeout: NodeJS.Timeout | null = null;
-        if (retryController) {
-          retryTimeout = setTimeout(() => retryController.abort(), retryTimeoutMs);
-        }
-        try {
-          response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: retryController?.signal,
-            body: JSON.stringify({
-              model: this.model,
-              temperature: options?.temperature ?? 0.2,
-              ...(typeof options?.maxTokens === 'number'
-                ? { max_tokens: options.maxTokens }
-                : {}),
-              messages: localMessages,
-            }),
-          });
-        } finally {
-          if (retryTimeout) clearTimeout(retryTimeout);
-        }
-      } else {
-        throw error;
-      }
     } finally {
       if (timeout) {
         clearTimeout(timeout);
