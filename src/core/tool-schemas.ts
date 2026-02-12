@@ -591,6 +591,136 @@ export const THUFIR_TOOLS: Tool[] = [
     },
   },
   {
+    name: 'agent_incidents_recent',
+    description:
+      'List recent agent incidents (tool failures + detected blockers). Use to debug what is missing and what failed recently.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', description: 'Maximum rows (default: 20)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'playbook_search',
+    description: 'Search operator playbooks by keyword to find procedures for fixing blockers.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query' },
+        limit: { type: 'number', description: 'Maximum results (default: 8)' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'playbook_get',
+    description: 'Get a specific operator playbook by key.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Playbook key (e.g., hyperliquid/funding)' },
+      },
+      required: ['key'],
+    },
+  },
+  {
+    name: 'playbook_upsert',
+    description:
+      'Create or update an operator playbook. Use to persist durable procedures after validating them.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        key: { type: 'string', description: 'Playbook key' },
+        title: { type: 'string', description: 'Playbook title' },
+        content: { type: 'string', description: 'Playbook content (markdown/plaintext)' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Optional tags' },
+      },
+      required: ['key', 'title', 'content'],
+    },
+  },
+  {
+    name: 'hyperliquid_verify_live',
+    description:
+      'Run Hyperliquid live verification checks (markets/mids/account/open orders/signer). Read-only.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Perp symbol to check (default: BTC)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'hyperliquid_order_roundtrip',
+    description:
+      'Place a tiny far-off limit order and cancel it to verify authenticated trading works. Side-effect tool.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        symbol: { type: 'string', description: 'Perp symbol (default: BTC)' },
+        side: { type: 'string', enum: ['buy', 'sell'], description: 'Side (default: buy)' },
+        size: { type: 'number', description: 'Order size in base units (keep tiny)' },
+        price_offset_bps: { type: 'number', description: 'How far from mid in bps (default: 5000)' },
+      },
+      required: ['size'],
+    },
+  },
+  {
+    name: 'evm_erc20_balance',
+    description: 'Get ERC20 token balance on an EVM chain (polygon|arbitrum). Read-only.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        chain: { type: 'string', enum: ['polygon', 'arbitrum'], description: 'Chain' },
+        address: { type: 'string', description: 'Owner address' },
+        token_address: { type: 'string', description: 'Token address (defaults to USDC for chain)' },
+        rpc_url: { type: 'string', description: 'Optional RPC URL override' },
+      },
+      required: ['chain', 'address'],
+    },
+  },
+  {
+    name: 'evm_usdc_balances',
+    description: 'Get native + USDC balances for polygon and arbitrum. Read-only.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        address: { type: 'string', description: 'Owner address (default: keystore address)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'cctp_bridge_usdc',
+    description: 'Bridge native USDC across supported chains via Circle CCTP v1 (polygon <-> arbitrum). Side-effect tool.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        from_chain: { type: 'string', enum: ['polygon', 'arbitrum'], description: 'Source chain (default: polygon)' },
+        to_chain: { type: 'string', enum: ['polygon', 'arbitrum'], description: 'Destination chain (default: arbitrum)' },
+        amount_usdc: { type: 'number', description: 'USDC amount to bridge' },
+        recipient: { type: 'string', description: 'Recipient on destination (default: same wallet)' },
+        poll_seconds: { type: 'number', description: 'Attestation poll interval (default: 5)' },
+        max_wait_seconds: { type: 'number', description: 'Max wait for attestation (default: 300)' },
+      },
+      required: ['amount_usdc'],
+    },
+  },
+  {
+    name: 'hyperliquid_deposit_usdc',
+    description: 'Deposit USDC to Hyperliquid by transferring Arbitrum USDC to the configured Hyperliquid bridge deposit address. Side-effect tool.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        amount_usdc: { type: 'number', description: 'USDC amount to deposit (min 5)' },
+        deposit_address: { type: 'string', description: 'Optional override deposit address' },
+      },
+      required: ['amount_usdc'],
+    },
+  },
+  {
     name: 'position_analysis',
     description: 'Analyze current perp positions for exposure, leverage, and liquidation risk.',
     input_schema: {

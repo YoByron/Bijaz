@@ -321,7 +321,16 @@ export class ConversationHandler {
           };
 
     const tradeToolNames = new Set(['perp_place_order']);
+    const fundingToolNames = new Set([
+      'cctp_bridge_usdc',
+      'hyperliquid_deposit_usdc',
+      'hyperliquid_order_roundtrip',
+      'playbook_upsert',
+    ]);
           const autoApproveTrades = Boolean(this.config.autonomy?.fullAuto);
+          const autoApproveFunding = Boolean(
+            this.config.autonomy?.fullAuto && this.config.autonomy?.allowFundingActions
+          );
           const resumePlan = this.shouldResumePlan(message);
           const priorPlan = resumePlan ? this.sessions.getPlan(userId) : null;
 
@@ -334,6 +343,9 @@ export class ConversationHandler {
             onConfirmation: async (_prompt, toolName) => {
               if (tradeToolNames.has(toolName)) {
                 return autoApproveTrades;
+              }
+              if (fundingToolNames.has(toolName)) {
+                return autoApproveFunding;
               }
               return false;
             },

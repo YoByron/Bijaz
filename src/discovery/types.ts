@@ -40,6 +40,8 @@ export interface ExpressionPlan {
   hypothesisId: string;
   symbol: string;
   side: 'buy' | 'sell';
+  confidence: number;
+  expectedEdge: number;
   entryZone: string;
   invalidation: string;
   expectedMove: string;

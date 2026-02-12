@@ -11,12 +11,19 @@ export function mapExpressionPlan(
   const probeFraction = config.autonomy?.probeRiskFraction ?? 0.005;
   const probeBudget = Math.max(1, dailyLimit * probeFraction);
   const side = hypothesis.expectedExpression.includes('down') ? 'sell' : 'buy';
+  const confidence = Math.min(1, Math.max(0, cluster.confidence));
+  const expectedEdge =
+    cluster.directionalBias === 'neutral'
+      ? 0
+      : Math.min(1, confidence * 0.1);
 
   return {
     id: `expr_${hypothesis.id}`,
     hypothesisId: hypothesis.id,
     symbol: cluster.symbol,
     side,
+    confidence,
+    expectedEdge,
     entryZone: 'market',
     invalidation: hypothesis.invalidation,
     expectedMove: hypothesis.expectedExpression,

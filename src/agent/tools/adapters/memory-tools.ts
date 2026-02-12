@@ -94,6 +94,70 @@ export const evaluationSummaryTool: ToolDefinition = {
   cacheTtlMs: DEFAULT_CACHE_TTL,
 };
 
+export const agentIncidentsRecentTool: ToolDefinition = {
+  name: 'agent_incidents_recent',
+  description: 'List recent agent incidents (tool failures + detected blockers). Use to debug operational gaps.',
+  category: 'memory',
+  schema: z.object({
+    limit: z.number().optional().describe('Maximum rows (default: 20)'),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('agent_incidents_recent', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+  sideEffects: false,
+  requiresConfirmation: false,
+  cacheTtlMs: 5_000,
+};
+
+export const playbookSearchTool: ToolDefinition = {
+  name: 'playbook_search',
+  description: 'Search operator playbooks by keyword. Use to find procedures for fixing blockers.',
+  category: 'memory',
+  schema: z.object({
+    query: z.string().describe('Search query'),
+    limit: z.number().optional().describe('Maximum results (default: 8)'),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('playbook_search', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+  sideEffects: false,
+  requiresConfirmation: false,
+  cacheTtlMs: 10_000,
+};
+
+export const playbookGetTool: ToolDefinition = {
+  name: 'playbook_get',
+  description: 'Get an operator playbook by key.',
+  category: 'memory',
+  schema: z.object({
+    key: z.string().describe('Playbook key (e.g., "hyperliquid/funding")'),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('playbook_get', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+  sideEffects: false,
+  requiresConfirmation: false,
+  cacheTtlMs: 10_000,
+};
+
+export const playbookUpsertTool: ToolDefinition = {
+  name: 'playbook_upsert',
+  description: 'Create or update an operator playbook. Use to persist durable procedures after you validate them.',
+  category: 'memory',
+  schema: z.object({
+    key: z.string().describe('Playbook key'),
+    title: z.string().describe('Playbook title'),
+    content: z.string().describe('Playbook content (markdown/plaintext)'),
+    tags: z.array(z.string()).optional().describe('Optional tags'),
+  }),
+  execute: async (input, ctx): Promise<ToolResult> => {
+    return executeToolCall('playbook_upsert', input as Record<string, unknown>, toExecutorContext(ctx));
+  },
+  sideEffects: true,
+  requiresConfirmation: true,
+  cacheTtlMs: 0,
+};
+
 /**
  * All memory tools.
  */
@@ -101,4 +165,8 @@ export const memoryTools: ToolDefinition[] = [
   calibrationStatsTool,
   memoryQueryTool,
   evaluationSummaryTool,
+  agentIncidentsRecentTool,
+  playbookSearchTool,
+  playbookGetTool,
+  playbookUpsertTool,
 ];

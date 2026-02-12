@@ -215,7 +215,20 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       return `Discovery scan completed:\n${lines.join('\n')}`;
     }
 
-    const toExecute = result.expressions.slice(0, this.config.maxTradesPerScan);
+    const eligible = result.expressions.filter((expr) => {
+      if (expr.expectedEdge < this.config.minEdge) {
+        return false;
+      }
+      if (this.config.requireHighConfidence && expr.confidence < 0.7) {
+        return false;
+      }
+      return true;
+    });
+    if (eligible.length === 0) {
+      return 'No expressions met autonomy thresholds (minEdge/confidence).';
+    }
+
+    const toExecute = eligible.slice(0, this.config.maxTradesPerScan);
     const outputs: string[] = [];
 
     for (const expr of toExecute) {
@@ -261,7 +274,9 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
         size,
         orderType: expr.orderType,
         leverage: expr.leverage,
-        reasoning: expr.expectedMove,
+        reasoning: `${expr.expectedMove} | edge=${(expr.expectedEdge * 100).toFixed(2)}% confidence=${(
+          expr.confidence * 100
+        ).toFixed(1)}%`,
       };
 
       const tradeResult = await this.executor.execute(market, decision);
@@ -299,6 +314,16 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       this.consecutiveLosses++;
     } else {
       this.consecutiveLosses = 0;
+    }
+
+    if (
+      this.config.pauseOnLossStreak > 0 &&
+      this.consecutiveLosses >= this.config.pauseOnLossStreak &&
+      !this.isPaused
+    ) {
+      this.pause(
+        `Loss streak threshold reached (${this.consecutiveLosses}/${this.config.pauseOnLossStreak})`
+      );
     }
   }
 

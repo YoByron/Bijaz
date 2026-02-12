@@ -120,6 +120,12 @@ const ConfigSchema = z.object({
     .object({
       keystorePath: z.string().optional(),
       rpcUrl: z.string().optional(),
+      rpcUrls: z
+        .object({
+          polygon: z.string().optional(),
+          arbitrum: z.string().optional(),
+        })
+        .default({}),
       limits: z
         .object({
           daily: z.number().default(100),
@@ -152,6 +158,68 @@ const ConfigSchema = z.object({
         .default({}),
     })
     .default({}),
+  evm: z
+    .object({
+      rpcUrls: z
+        .object({
+          polygon: z.string().optional(),
+          arbitrum: z.string().optional(),
+        })
+        .default({}),
+      usdc: z
+        .object({
+          polygon: z
+            .object({
+              address: z.string().default('0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359'),
+              decimals: z.number().default(6),
+            })
+            .default({}),
+          arbitrum: z
+            .object({
+              address: z.string().default('0xaf88d065e77c8cC2239327C5EDb3A432268e5831'),
+              decimals: z.number().default(6),
+            })
+            .default({}),
+        })
+        .default({}),
+    })
+    .default({}),
+  cctp: z
+    .object({
+      enabled: z.boolean().default(true),
+      irisBaseUrl: z.string().default('https://iris-api.circle.com'),
+      domains: z
+        .object({
+          polygon: z.number().default(7),
+          arbitrum: z.number().default(3),
+        })
+        .default({}),
+      contracts: z
+        .object({
+          polygon: z
+            .object({
+              tokenMessenger: z
+                .string()
+                .default('0x9daF8cA8E7D0c6Aef7c3D06d1C0c9A9b32a0cC7c'),
+              messageTransmitter: z
+                .string()
+                .default('0xF3be935536e7a0E6dE3881F5fC6B7A3068F70e34'),
+            })
+            .default({}),
+          arbitrum: z
+            .object({
+              tokenMessenger: z
+                .string()
+                .default('0x19330d10D9Cc8751218eaf51E8885D058642E08A'),
+              messageTransmitter: z
+                .string()
+                .default('0xC30362313FBBA5cf9163F0bb16a0e01f01A896ca'),
+            })
+            .default({}),
+        })
+        .default({}),
+    })
+    .default({}),
   hyperliquid: z
     .object({
       enabled: z.boolean().default(true),
@@ -162,6 +230,16 @@ const ConfigSchema = z.object({
       maxLeverage: z.number().default(5),
       defaultSlippageBps: z.number().default(10),
       symbols: z.array(z.string()).default(['BTC', 'ETH']),
+      bridge: z
+        .object({
+          enabled: z.boolean().default(true),
+          chain: z.enum(['arbitrum']).default('arbitrum'),
+          depositAddress: z
+            .string()
+            .default('0x2df1c51e09aecf9cacb7bc98cb1742757f163df7'),
+          minDepositUsdc: z.number().default(5),
+        })
+        .default({}),
     })
     .default({}),
   technical: z
@@ -433,6 +511,7 @@ const ConfigSchema = z.object({
       probeRiskFraction: z.number().default(0.005),
       // Full autonomous mode options
       fullAuto: z.boolean().default(false),
+      allowFundingActions: z.boolean().default(false),
       minEdge: z.number().default(0.05),
       requireHighConfidence: z.boolean().default(false),
       pauseOnLossStreak: z.number().default(3),
