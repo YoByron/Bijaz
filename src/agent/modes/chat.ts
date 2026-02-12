@@ -30,6 +30,9 @@ const CHAT_TOOLS = [
   // Memory tools
   'calibration_stats',
   'memory.query',
+  'agent_incidents_recent',
+  'playbook_search',
+  'playbook_get',
 
   // Web tools
   'web_search',
@@ -46,6 +49,11 @@ const CHAT_TOOLS = [
   // Portfolio viewing (no trading)
   'get_portfolio',
   'get_positions',
+  'hyperliquid_verify_live',
+
+  // Funding probes (read-only)
+  'evm_erc20_balance',
+  'evm_usdc_balances',
 ];
 
 /**

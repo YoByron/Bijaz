@@ -498,6 +498,40 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 
 -- ============================================================================
+-- Agent Incidents + Playbooks
+-- ============================================================================
+
+-- Structured failure artifacts. This is the substrate for "learning" from ops
+-- failures: detect -> diagnose -> remediate -> verify -> save.
+CREATE TABLE IF NOT EXISTS agent_incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT DEFAULT (datetime('now')),
+    goal TEXT,
+    mode TEXT,
+    tool_name TEXT,
+    error TEXT,
+    blocker_kind TEXT,
+    details_json TEXT,
+    resolved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_incidents_created ON agent_incidents(created_at);
+CREATE INDEX IF NOT EXISTS idx_agent_incidents_blocker ON agent_incidents(blocker_kind);
+
+-- Playbooks are durable operator knowledge. They should be small, high-signal
+-- remediation procedures keyed by capability/blocker.
+CREATE TABLE IF NOT EXISTS agent_playbooks (
+    key TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    tags_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_playbooks_updated ON agent_playbooks(updated_at);
+
+-- ============================================================================
 -- Views
 -- ============================================================================
 

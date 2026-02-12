@@ -26,6 +26,17 @@ import { buildIdentityPrompt, buildMinimalIdentityPrompt } from '../identity/ide
 import type { QuickFragilityScan } from '../../mentat/scan.js';
 import { recordDecisionAudit } from '../../memory/decision_audit.js';
 import {
+  recordAgentIncident,
+  listRecentAgentIncidents,
+  type AgentBlockerKind,
+} from '../../memory/incidents.js';
+import { getPlaybook, upsertPlaybook, searchPlaybooks } from '../../memory/playbooks.js';
+import {
+  detectBlockers,
+  seedPlaybookForBlocker,
+  suggestedRemediationToolSteps,
+} from './blockers.js';
+import {
   createAgentState,
   updatePlan,
   addToolExecution,
@@ -39,6 +50,110 @@ import {
   shouldContinue,
   toToolExecutionContext,
 } from './state.js';
+
+function formatRecentIncidentsForContext(goal: string, mode: string): string | null {
+  // Keep it small and high-signal; this is for planning, not logging.
+  try {
+    const incidents = listRecentAgentIncidents(10);
+    if (incidents.length === 0) return null;
+
+    const lines: string[] = [];
+    lines.push('Recent failures (for operational learning):');
+    for (const inc of incidents.slice(0, 6)) {
+      const when = inc.createdAt;
+      const tool = inc.toolName ?? 'unknown_tool';
+      const kind = inc.blockerKind ?? 'unknown';
+      const err = (inc.error ?? '').slice(0, 180);
+      lines.push(`- ${when} kind=${kind} tool=${tool} err=${err}`);
+    }
+
+    // Add a tiny hint so the planner knows these are patterns, not current truth.
+    lines.push('');
+    lines.push(`Current goal: ${goal}`);
+    lines.push(`Current mode: ${mode}`);
+    return lines.join('\n');
+  } catch {
+    return null;
+  }
+}
+
+function formatPlaybooksForContext(goal: string): string | null {
+  try {
+    const matches = searchPlaybooks({ query: goal, limit: 4 });
+    if (matches.length === 0) return null;
+    const out: string[] = [];
+    out.push('Operator playbooks (procedures):');
+    for (const pb of matches) {
+      out.push(`### ${pb.title} (${pb.key})`);
+      out.push(pb.content.slice(0, 900));
+      out.push('');
+    }
+    return out.join('\n').trim();
+  } catch {
+    return null;
+  }
+}
+
+function injectRemediationAndRetry(params: {
+  plan: import('../planning/types.js').AgentPlan;
+  failedStep: PlanStep;
+  blockers: Array<{ kind: AgentBlockerKind; summary: string }>;
+  toolRegistry: OrchestratorContext['toolRegistry'];
+}): { updated: import('../planning/types.js').AgentPlan; injected: boolean; injectedCount: number } {
+  const { plan, failedStep, blockers, toolRegistry } = params;
+
+  const available = new Set(toolRegistry.listNames());
+  const newSteps: PlanStep[] = [];
+  const remediationStepIds: string[] = [];
+  let counter = 1;
+
+  for (const blk of blockers) {
+    const candidates = suggestedRemediationToolSteps(blk.kind);
+    for (const cand of candidates) {
+      if (!available.has(cand.toolName)) continue;
+      const id = `remediate-${failedStep.id}-${counter++}`;
+      remediationStepIds.push(id);
+      newSteps.push({
+        id,
+        description: cand.description,
+        requiresTool: true,
+        toolName: cand.toolName,
+        toolInput: cand.toolInput,
+        status: 'pending',
+      });
+    }
+  }
+
+  if (newSteps.length === 0) {
+    return { updated: plan, injected: false, injectedCount: 0 };
+  }
+
+  // Retry step after remediation.
+  const retryId = `retry-${failedStep.id}`;
+  newSteps.push({
+    id: retryId,
+    description: `Retry: ${failedStep.description}`,
+    requiresTool: failedStep.requiresTool,
+    toolName: failedStep.toolName,
+    toolInput: failedStep.toolInput,
+    status: 'pending',
+    dependsOn: remediationStepIds.length > 0 ? remediationStepIds : undefined,
+  });
+
+  const updatedSteps = plan.steps.map((s) =>
+    s.id === failedStep.id ? { ...s, status: 'failed' as const } : s
+  );
+
+  return {
+    updated: {
+      ...plan,
+      steps: [...updatedSteps, ...newSteps],
+      updatedAt: new Date().toISOString(),
+    },
+    injected: true,
+    injectedCount: newSteps.length,
+  };
+}
 
 function isDebugEnabled(): boolean {
   return (process.env.THUFIR_LOG_LEVEL ?? '').toLowerCase() === 'debug';
@@ -250,6 +365,16 @@ export async function runOrchestrator(
     memoryParts.push('## Knowledge Base\n' + qmdContext);
   }
 
+  // 2c: Operational learning artifacts (incidents + playbooks)
+  const incidentContext = formatRecentIncidentsForContext(goal, modeResult.mode);
+  if (incidentContext) {
+    memoryParts.push('## Recent Incidents\n' + incidentContext);
+  }
+  const playbookContext = formatPlaybooksForContext(goal);
+  if (playbookContext) {
+    memoryParts.push('## Playbooks\n' + playbookContext);
+  }
+
   // Combine memory sources
   if (memoryParts.length > 0) {
     state = setMemoryContext(state, memoryParts.join('\n\n'));
@@ -335,12 +460,80 @@ export async function runOrchestrator(
       const execution = await executeToolStep(nextStep, state, ctx);
       state = addToolExecution(state, execution);
 
+      const stepBlockers = execution.result.success ? [] : detectBlockers(execution);
+
+      // Record structured incident artifacts on tool failure.
+      if (!execution.result.success) {
+        const failed = execution.result as { success: false; error: string };
+
+        // Persist incident (always), then seed any missing playbooks for detected blockers.
+        const primaryKind: AgentBlockerKind =
+          (stepBlockers[0]?.kind as AgentBlockerKind | undefined) ?? 'unknown';
+        recordAgentIncident({
+          goal,
+          mode: state.mode,
+          toolName: execution.toolName,
+          error: failed.error,
+          blockerKind: primaryKind,
+          details: {
+            stepId: nextStep.id,
+            planId: state.plan?.id ?? null,
+            detectedBlockers: stepBlockers.map((b) => ({
+              kind: b.kind,
+              summary: b.summary,
+              evidence: b.evidence,
+              suggestedNextSteps: b.suggestedNextSteps,
+              playbookKey: b.playbookKey ?? null,
+            })),
+          },
+        });
+
+        for (const b of stepBlockers) {
+          state = addWarning(state, `Detected blocker: ${b.kind} (${b.summary})`);
+          if (state.plan && !state.plan.blockers.includes(b.summary)) {
+            state = setPlan(state, {
+              ...state.plan,
+              blockers: [...state.plan.blockers, b.summary],
+              updatedAt: new Date().toISOString(),
+            });
+          }
+
+          if (b.playbookKey) {
+            const existing = getPlaybook(b.playbookKey);
+            if (!existing) {
+              const seed = seedPlaybookForBlocker(b.kind);
+              if (seed) {
+                upsertPlaybook(seed);
+              }
+            }
+          }
+        }
+      }
+
       // Update plan with step result
       if (execution.result.success) {
         state = setPlan(state, completeStep(state.plan!, nextStep.id, execution.result));
       } else {
         const failedResult = execution.result as { success: false; error: string };
-        state = setPlan(state, failStep(state.plan!, nextStep.id, failedResult.error));
+        if (state.plan && stepBlockers.length > 0) {
+          const injected = injectRemediationAndRetry({
+            plan: state.plan,
+            failedStep: nextStep,
+            blockers: stepBlockers,
+            toolRegistry: ctx.toolRegistry,
+          });
+          if (injected.injected) {
+            state = setPlan(state, injected.updated);
+            state = addWarning(
+              state,
+              `Injected ${injected.injectedCount} remediation step(s) after tool failure`
+            );
+          } else {
+            state = setPlan(state, failStep(state.plan!, nextStep.id, failedResult.error));
+          }
+        } else {
+          state = setPlan(state, failStep(state.plan!, nextStep.id, failedResult.error));
+        }
       }
 
       // Reflect on tool result

@@ -12,6 +12,8 @@ export { systemTools } from './system-tools.js';
 export { qmdTools } from './qmd-tools.js';
 export { mentatTools } from './mentat-tools.js';
 export { discoveryTools } from './discovery-tools.js';
+export { hyperliquidTools } from './hyperliquid-tools.js';
+export { evmTools } from './evm-tools.js';
 
 import { intelTools } from './intel-tools.js';
 import { tradingTools } from './trading-tools.js';
@@ -21,6 +23,8 @@ import { systemTools } from './system-tools.js';
 import { qmdTools } from './qmd-tools.js';
 import { mentatTools } from './mentat-tools.js';
 import { discoveryTools } from './discovery-tools.js';
+import { hyperliquidTools } from './hyperliquid-tools.js';
+import { evmTools } from './evm-tools.js';
 import type { ToolDefinition } from '../types.js';
 import type { AgentToolRegistry } from '../registry.js';
 
@@ -36,6 +40,8 @@ export const allTools: ToolDefinition[] = [
   ...qmdTools,
   ...mentatTools,
   ...discoveryTools,
+  ...hyperliquidTools,
+  ...evmTools,
 ];
 
 /**

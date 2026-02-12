@@ -1,6 +1,6 @@
 # Thufir Development Progress
 
-**Last Updated:** 2026-02-11
+**Last Updated:** 2026-02-12
 
 ## Current Status
 Hyperliquid perps + autonomous discovery are integrated. Identity prompts are platform-agnostic (tool-driven). On this branch, `pnpm build` and `pnpm exec vitest run` pass on Node 22.
@@ -10,6 +10,8 @@ Hyperliquid perps + autonomous discovery are integrated. Identity prompts are pl
 - Live executor for Hyperliquid perps
 - Perp risk checks (max notional, leverage caps, liquidation distance, correlation caps)
 - Discovery engine (signals -> hypotheses -> expressions)
+- Autonomous execution thresholds now enforced (`minEdge`, `requireHighConfidence`, `pauseOnLossStreak`)
+- Technical on-chain snapshot now computes live score from Hyperliquid funding/orderflow/book data
 - Perp tools (`perp_market_list`, `perp_market_get`, `perp_place_order`, `perp_open_orders`, `perp_cancel_order`, `perp_positions`)
 - Portfolio now surfaces perp positions
 - User-facing prompts updated away from legacy market flows
@@ -17,12 +19,12 @@ Hyperliquid perps + autonomous discovery are integrated. Identity prompts are pl
 - Full test suite passing in this branch (`32` files / `99` tests)
 - TypeScript build passing in this branch
 - Coverage configuration hardened (vendor-remap exclusions + minimum thresholds)
-- Live verification command added: `thufir env verify-live` (read-only smoke check)
+- Live verification command added: `thufir env verify-live` (read-only smoke check + authenticated readiness checks)
 - Lint gate fixed (`pnpm lint` now runs against TypeScript sources with project ESLint config)
 
 ## In Progress
 - Authenticated live API verification in a real account (requires `HYPERLIQUID_PRIVATE_KEY`)
-- Tightening discovery/reporting outputs for live operation clarity
+- Optional expansion of on-chain providers (e.g. Coinglass/Whale APIs)
 
 ## Next Steps
 1. Run `thufir env verify-live` with real credentials and execute a tiny manual order/cancel roundtrip

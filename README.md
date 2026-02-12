@@ -599,9 +599,9 @@ Thufir/
 
 ### Phase 2: Intelligence
 - [x] RSS feed integration
-- [ ] News API integration (NewsAPI, Google News)
-- [ ] Twitter/X sentiment analysis
-- [ ] Vector DB for context retrieval (ChromaDB)
+- [x] News API integration (NewsAPI, Google News)
+- [x] Twitter/X sentiment analysis
+- [x] Vector DB for context retrieval
 - [x] Daily briefing generation
 
 ### Phase 3: Calibration
@@ -617,10 +617,10 @@ Thufir/
 - [ ] Web dashboard
 
 ### Phase 5: Proactive Intelligence (PLANNED)
-- [ ] **Daily Top 10 Trades**: Automatically scour Hyperliquid + news to find best opportunities
-- [ ] **Event-Driven Alerts**: Monitor current events and alert when relevant markets have edge
-- [ ] **Full Autonomous Mode**: Toggle on/off autonomous betting with daily P&L reports
-- [ ] Clawdbot integration for proactive search and multi-step reasoning
+- [x] **Daily Top 10 Trades**: Automatically scour Hyperliquid + news to find best opportunities
+- [x] **Event-Driven Alerts**: Monitor current events and alert when relevant markets have edge
+- [x] **Full Autonomous Mode**: Toggle on/off autonomous betting with daily P&L reports
+- [x] Clawdbot-style proactive search + multi-step reasoning (local implementation)
 
 ### Phase 6: Advanced
 - [ ] Multi-market correlation analysis

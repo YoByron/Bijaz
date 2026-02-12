@@ -31,6 +31,9 @@ const MENTAT_TOOLS = [
   // Memory tools
   'calibration_stats',
   'memory.query',
+  'agent_incidents_recent',
+  'playbook_search',
+  'playbook_get',
 
   // Web tools
   'web_search',
@@ -51,6 +54,11 @@ const MENTAT_TOOLS = [
   'signal_cross_asset_divergence',
   'signal_hyperliquid_funding_oi_skew',
   'signal_hyperliquid_orderflow_imbalance',
+  'hyperliquid_verify_live',
+
+  // Funding probes (read-only)
+  'evm_erc20_balance',
+  'evm_usdc_balances',
 
   // No trade.place - mentat mode is analysis only
 ];

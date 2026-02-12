@@ -1,8 +1,8 @@
 # Implementation Plan (Hyperliquid Pivot)
 
-## Status (2026-02-11)
+## Status (2026-02-12)
 - Phases 1-3 are implemented in code.
-- Phase 4 is partially complete: tests/build are passing on Node 22, coverage thresholds are configured, and a live smoke-check command exists; authenticated live account verification remains.
+- Phase 4 is partially complete: tests/build are passing on Node 22, coverage thresholds are configured, and `thufir env verify-live` now checks market data, account state, open orders, and signer readiness; authenticated real-account trade/cancel verification remains.
 - Phase 5 remains ongoing iteration work.
 
 ## Phase 1: Perp Integration
@@ -19,6 +19,8 @@
 ## Phase 3: Agent + Tooling
 - Tool calling wired into agent modes
 - Autonomy loop uses discovery outputs
+- Autonomy thresholds enforced (`minEdge`, `requireHighConfidence`, `pauseOnLossStreak`)
+- On-chain scoring uses live Hyperliquid funding/orderflow/book signals
 - CLI and docs updated
 
 ## Phase 4: Verification

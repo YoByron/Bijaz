@@ -3,6 +3,7 @@ import type { Market } from '../execution/markets.js';
 import type { MarketClient } from '../execution/market-client.js';
 import type { ExecutionAdapter, TradeDecision } from '../execution/executor.js';
 import type { LimitCheckResult } from '../execution/wallet/limits.js';
+import { ethers } from 'ethers';
 import { checkPerpRiskLimits } from '../execution/perp-risk.js';
 import { listCalibrationSummaries } from '../memory/calibration.js';
 import { listRecentIntel, searchIntel, type StoredIntel } from '../intel/store.js';
@@ -15,6 +16,11 @@ import {
   signalHyperliquidOrderflowImbalance,
 } from '../discovery/signals.js';
 import { listPerpTrades } from '../memory/perp_trades.js';
+import { listRecentAgentIncidents } from '../memory/incidents.js';
+import { getPlaybook, searchPlaybooks, upsertPlaybook } from '../memory/playbooks.js';
+import { getRpcUrl, getUsdcConfig, type EvmChain } from '../execution/evm/chains.js';
+import { getErc20Balance, transferErc20 } from '../execution/evm/erc20.js';
+import { cctpV1BridgeUsdc } from '../execution/evm/cctp_v1.js';
 
 /** Minimal interface for spending limit enforcement used in tool execution */
 export interface ToolSpendingLimiter {
@@ -182,6 +188,416 @@ export async function executeToolCall(
 ): Promise<ToolResult> {
   try {
     switch (toolName) {
+      case 'agent_incidents_recent': {
+        const limit = Math.max(1, Math.min(200, Number(toolInput.limit ?? 20) || 20));
+        const incidents = listRecentAgentIncidents(limit);
+        return { success: true, data: { incidents } };
+      }
+
+      case 'playbook_search': {
+        const query = String(toolInput.query ?? '').trim();
+        if (!query) return { success: false, error: 'Missing query' };
+        const limit = Math.max(1, Math.min(50, Number(toolInput.limit ?? 8) || 8));
+        const results = searchPlaybooks({ query, limit });
+        return { success: true, data: { results } };
+      }
+
+      case 'playbook_get': {
+        const key = String(toolInput.key ?? '').trim();
+        if (!key) return { success: false, error: 'Missing key' };
+        const playbook = getPlaybook(key);
+        if (!playbook) return { success: false, error: `Playbook not found: ${key}` };
+        return { success: true, data: playbook };
+      }
+
+      case 'playbook_upsert': {
+        const key = String(toolInput.key ?? '').trim();
+        const title = String(toolInput.title ?? '').trim();
+        const content = String(toolInput.content ?? '').trim();
+        const tags = Array.isArray(toolInput.tags) ? toolInput.tags.map(String) : [];
+        if (!key || !title || !content) {
+          return { success: false, error: 'Missing key/title/content' };
+        }
+        upsertPlaybook({ key, title, content, tags });
+        return { success: true, data: { upserted: true, key } };
+      }
+
+      case 'hyperliquid_verify_live': {
+        const symbol = String(toolInput.symbol ?? 'BTC').trim().toUpperCase();
+        const client = new HyperliquidClient(ctx.config);
+        const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+
+        try {
+          const markets = await client.listPerpMarkets();
+          const hasSymbol = markets.some((m) => m.symbol === symbol);
+          checks.push({
+            name: 'Perp markets',
+            ok: markets.length > 0,
+            detail: `loaded ${markets.length} market(s)`,
+          });
+          checks.push({
+            name: `Symbol ${symbol}`,
+            ok: hasSymbol,
+            detail: hasSymbol ? 'found in market metadata' : 'not found in market metadata',
+          });
+        } catch (error) {
+          checks.push({
+            name: 'Perp markets',
+            ok: false,
+            detail: error instanceof Error ? error.message : 'unknown error',
+          });
+        }
+
+        try {
+          const mids = await client.getAllMids();
+          const mid = mids[symbol];
+          checks.push({
+            name: 'Mid prices',
+            ok: Object.keys(mids).length > 0,
+            detail:
+              typeof mid === 'number'
+                ? `${symbol} mid=${mid}`
+                : `${Object.keys(mids).length} symbol(s) loaded`,
+          });
+        } catch (error) {
+          checks.push({
+            name: 'Mid prices',
+            ok: false,
+            detail: error instanceof Error ? error.message : 'unknown error',
+          });
+        }
+
+        const accountAddress = client.getAccountAddress();
+        if (accountAddress) {
+          try {
+            const state = await client.getClearinghouseState();
+            const stateKeys =
+              state && typeof state === 'object'
+                ? Object.keys(state as Record<string, unknown>).length
+                : 0;
+            checks.push({
+              name: 'Account state',
+              ok: true,
+              detail: `loaded for ${accountAddress.slice(0, 10)}... (${stateKeys} field(s))`,
+            });
+          } catch (error) {
+            checks.push({
+              name: 'Account state',
+              ok: false,
+              detail: error instanceof Error ? error.message : 'unknown error',
+            });
+          }
+
+          try {
+            const openOrders = await client.getOpenOrders();
+            checks.push({
+              name: 'Open orders',
+              ok: Array.isArray(openOrders),
+              detail: Array.isArray(openOrders)
+                ? `${openOrders.length} open order(s)`
+                : 'unexpected payload shape',
+            });
+          } catch (error) {
+            checks.push({
+              name: 'Open orders',
+              ok: false,
+              detail: error instanceof Error ? error.message : 'unknown error',
+            });
+          }
+
+          try {
+            client.getExchangeClient();
+            checks.push({
+              name: 'Exchange signer',
+              ok: true,
+              detail: 'private key loaded',
+            });
+          } catch (error) {
+            checks.push({
+              name: 'Exchange signer',
+              ok: false,
+              detail: error instanceof Error ? error.message : 'unknown error',
+            });
+          }
+        } else {
+          checks.push({
+            name: 'Account state',
+            ok: false,
+            detail:
+              'missing HYPERLIQUID_ACCOUNT_ADDRESS/HYPERLIQUID_PRIVATE_KEY (required for authenticated checks)',
+          });
+          checks.push({
+            name: 'Open orders',
+            ok: false,
+            detail:
+              'missing HYPERLIQUID_ACCOUNT_ADDRESS/HYPERLIQUID_PRIVATE_KEY (required for authenticated checks)',
+          });
+          checks.push({
+            name: 'Exchange signer',
+            ok: false,
+            detail: 'missing HYPERLIQUID_PRIVATE_KEY',
+          });
+        }
+
+        const ok = checks.every((c) => c.ok);
+        return { success: true, data: { ok, checks } };
+      }
+
+      case 'hyperliquid_order_roundtrip': {
+        const symbol = String(toolInput.symbol ?? 'BTC').trim().toUpperCase();
+        const size = Number(toolInput.size ?? 0);
+        const side = String(toolInput.side ?? 'buy').trim().toLowerCase() === 'sell' ? 'sell' : 'buy';
+        const priceOffsetBps = Number(toolInput.price_offset_bps ?? 5000); // 50% away by default
+        if (!Number.isFinite(size) || size <= 0) {
+          return { success: false, error: 'Missing or invalid size' };
+        }
+
+        const client = new HyperliquidClient(ctx.config);
+        const exchange = client.getExchangeClient();
+        const markets = await client.listPerpMarkets();
+        const marketMeta = markets.find((m) => m.symbol === symbol);
+        if (!marketMeta) {
+          return { success: false, error: `Unknown Hyperliquid symbol: ${symbol}` };
+        }
+
+        const mids = await client.getAllMids();
+        const mid = mids[symbol];
+        if (typeof mid !== 'number' || !Number.isFinite(mid) || mid <= 0) {
+          return { success: false, error: `Missing mid price for ${symbol}` };
+        }
+
+        const bps = Math.max(100, Math.min(9000, Number.isFinite(priceOffsetBps) ? priceOffsetBps : 5000));
+        const offset = bps / 10000;
+        const limitPx = side === 'buy' ? mid * (1 - offset) : mid * (1 + offset);
+
+        const formatDecimal = (value: number, decimals: number): string => {
+          const fixed = value.toFixed(decimals);
+          return fixed.replace(/\\.?0+$/, '');
+        };
+
+        const sizeStr = formatDecimal(size, marketMeta.szDecimals ?? 6);
+        const priceStr = formatDecimal(limitPx, 8);
+
+        const result = await exchange.order({
+          orders: [
+            {
+              a: marketMeta.assetId,
+              b: side === 'buy',
+              p: priceStr,
+              s: sizeStr,
+              r: false,
+              t: { limit: { tif: 'Gtc' } },
+            },
+          ],
+          grouping: 'na',
+        } as any);
+
+        const status = (result as any)?.response?.data?.statuses?.[0];
+        const oid =
+          status && typeof status === 'object' && 'resting' in status
+            ? (status as any)?.resting?.oid
+            : status && typeof status === 'object' && 'filled' in status
+              ? (status as any)?.filled?.oid
+              : null;
+
+        if (!oid) {
+          return { success: false, error: 'Order did not return an order id (oid)' };
+        }
+
+        // Cancel immediately.
+        await exchange.cancel({ cancels: [{ a: marketMeta.assetId, o: Number(oid) }] } as any);
+
+        // Verify it is not present anymore (best-effort).
+        let stillOpen: boolean | null = null;
+        try {
+          const openOrders = await client.getOpenOrders();
+          if (Array.isArray(openOrders)) {
+            stillOpen = openOrders.some((o) => Number((o as any)?.oid) === Number(oid));
+          }
+        } catch {
+          stillOpen = null;
+        }
+
+        return {
+          success: true,
+          data: {
+            symbol,
+            side,
+            size: Number(sizeStr),
+            mid,
+            limitPx,
+            oid: String(oid),
+            cancelled: true,
+            stillOpen,
+          },
+        };
+      }
+
+      case 'evm_erc20_balance': {
+        const chain = String(toolInput.chain ?? '').trim().toLowerCase() as EvmChain;
+        if (chain !== 'polygon' && chain !== 'arbitrum') {
+          return { success: false, error: 'Invalid chain (use polygon|arbitrum)' };
+        }
+        const rpc = String(toolInput.rpc_url ?? '').trim() || getRpcUrl(ctx.config, chain);
+        if (!rpc) return { success: false, error: `Missing RPC for ${chain}` };
+        const provider = new ethers.providers.JsonRpcProvider(rpc);
+        const token =
+          String(toolInput.token_address ?? '').trim() || getUsdcConfig(ctx.config, chain).address;
+        const owner = String(toolInput.address ?? '').trim();
+        if (!token) return { success: false, error: 'Missing token_address' };
+        if (!owner) return { success: false, error: 'Missing address' };
+        const bal = await getErc20Balance({ provider, token, owner });
+        return {
+          success: true,
+          data: {
+            chain,
+            token,
+            owner,
+            balance: Number(bal.formatted),
+            decimals: bal.decimals,
+            raw: bal.raw,
+          },
+        };
+      }
+
+      case 'evm_usdc_balances': {
+        let address = String(toolInput.address ?? '').trim();
+        if (!address) {
+          // Read address from keystore without decrypting the private key.
+          const path =
+            ctx.config.wallet?.keystorePath ??
+            process.env.THUFIR_KEYSTORE_PATH ??
+            `${process.env.HOME ?? ''}/.thufir/keystore.json`;
+          const store = loadKeystore(path);
+          address = String(store.address ?? '').trim();
+        }
+        if (!address) return { success: false, error: 'Missing address (and keystore has no address)' };
+        const chains: EvmChain[] = ['polygon', 'arbitrum'];
+        const results: Record<string, unknown> = {};
+        for (const chain of chains) {
+          const rpc = getRpcUrl(ctx.config, chain);
+          if (!rpc) {
+            results[chain] = { ok: false, error: `Missing RPC for ${chain}` };
+            continue;
+          }
+          const provider = new ethers.providers.JsonRpcProvider(rpc);
+          const usdc = getUsdcConfig(ctx.config, chain);
+          try {
+            const [native, erc20] = await Promise.all([
+              provider.getBalance(address),
+              getErc20Balance({ provider, token: usdc.address, owner: address }),
+            ]);
+            results[chain] = {
+              ok: true,
+              rpc,
+              native: Number(ethers.utils.formatEther(native)),
+              usdc: Number(erc20.formatted),
+              usdcAddress: usdc.address,
+            };
+          } catch (error) {
+            results[chain] = {
+              ok: false,
+              rpc,
+              error: error instanceof Error ? error.message : 'Unknown error',
+            };
+          }
+        }
+        return { success: true, data: { address, results } };
+      }
+
+      case 'cctp_bridge_usdc': {
+        const fromChain = String(toolInput.from_chain ?? 'polygon').trim().toLowerCase() as EvmChain;
+        const toChain = String(toolInput.to_chain ?? 'arbitrum').trim().toLowerCase() as EvmChain;
+        const amountUsdc = Number(toolInput.amount_usdc ?? 0);
+        const recipient = toolInput.recipient ? String(toolInput.recipient) : undefined;
+        if (!['polygon', 'arbitrum'].includes(fromChain) || !['polygon', 'arbitrum'].includes(toChain)) {
+          return { success: false, error: 'Invalid from_chain/to_chain' };
+        }
+        const password = process.env.THUFIR_WALLET_PASSWORD ?? '';
+        if (!password) {
+          return { success: false, error: 'Missing THUFIR_WALLET_PASSWORD (required for signing)' };
+        }
+        const path =
+          ctx.config.wallet?.keystorePath ??
+          process.env.THUFIR_KEYSTORE_PATH ??
+          `${process.env.HOME ?? ''}/.thufir/keystore.json`;
+        const store = loadKeystore(path);
+        const { decryptPrivateKey } = await import('../execution/wallet/keystore.js');
+        const privateKey = decryptPrivateKey(store, password);
+
+        const res = await cctpV1BridgeUsdc({
+          config: ctx.config,
+          privateKey,
+          fromChain,
+          toChain,
+          amountUsdc,
+          recipient,
+          pollSeconds: toolInput.poll_seconds ? Number(toolInput.poll_seconds) : undefined,
+          maxWaitSeconds: toolInput.max_wait_seconds ? Number(toolInput.max_wait_seconds) : undefined,
+        });
+        return { success: true, data: res };
+      }
+
+      case 'hyperliquid_deposit_usdc': {
+        const amountUsdc = Number(toolInput.amount_usdc ?? 0);
+        if (!Number.isFinite(amountUsdc) || amountUsdc <= 0) {
+          return { success: false, error: 'Invalid amount_usdc' };
+        }
+        const password = process.env.THUFIR_WALLET_PASSWORD ?? '';
+        if (!password) {
+          return { success: false, error: 'Missing THUFIR_WALLET_PASSWORD (required for signing)' };
+        }
+        const chain: EvmChain = 'arbitrum';
+        const rpc = getRpcUrl(ctx.config, chain);
+        if (!rpc) {
+          return {
+            success: false,
+            error: 'Missing Arbitrum RPC (THUFIR_EVM_RPC_ARBITRUM or config.evm.rpcUrls.arbitrum)',
+          };
+        }
+        const path =
+          ctx.config.wallet?.keystorePath ??
+          process.env.THUFIR_KEYSTORE_PATH ??
+          `${process.env.HOME ?? ''}/.thufir/keystore.json`;
+        const store = loadKeystore(path);
+        const { decryptPrivateKey } = await import('../execution/wallet/keystore.js');
+        const privateKey = decryptPrivateKey(store, password);
+        const provider = new ethers.providers.JsonRpcProvider(rpc);
+        const wallet = new ethers.Wallet(privateKey, provider);
+
+        const depositAddress =
+          String(toolInput.deposit_address ?? '').trim() ||
+          String(ctx.config.hyperliquid?.bridge?.depositAddress ?? '').trim();
+        if (!depositAddress) {
+          return { success: false, error: 'Missing deposit_address' };
+        }
+        const minDeposit = Number(ctx.config.hyperliquid?.bridge?.minDepositUsdc ?? 5);
+        if (amountUsdc < minDeposit) {
+          return { success: false, error: `Deposit too small. Minimum is ${minDeposit} USDC.` };
+        }
+
+        const usdc = getUsdcConfig(ctx.config, chain);
+        const raw = ethers.utils.parseUnits(String(amountUsdc), usdc.decimals);
+        const tx = await transferErc20({
+          signer: wallet,
+          token: usdc.address,
+          to: depositAddress,
+          amount: raw,
+        });
+        await provider.waitForTransaction(tx.txHash, 1);
+
+        return {
+          success: true,
+          data: {
+            chain,
+            token: usdc.address,
+            depositAddress,
+            amountUsdc,
+            txHash: tx.txHash,
+          },
+        };
+      }
+
       case 'perp_market_list': {
         const limit = Math.min(Number(toolInput.limit ?? 20), 200);
         const markets = await ctx.marketClient.listMarkets(limit);

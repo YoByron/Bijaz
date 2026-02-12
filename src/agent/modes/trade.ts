@@ -33,6 +33,9 @@ const TRADE_TOOLS = [
   // Memory tools
   'calibration_stats',
   'memory.query',
+  'agent_incidents_recent',
+  'playbook_search',
+  'playbook_get',
 
   // Web tools
   'web_search',
@@ -55,6 +58,14 @@ const TRADE_TOOLS = [
   'signal_hyperliquid_funding_oi_skew',
   'signal_hyperliquid_orderflow_imbalance',
   'discovery_run',
+  'hyperliquid_verify_live',
+  'hyperliquid_order_roundtrip',
+
+  // Funding / bridging tools
+  'evm_erc20_balance',
+  'evm_usdc_balances',
+  'cctp_bridge_usdc',
+  'hyperliquid_deposit_usdc',
 ];
 
 /**

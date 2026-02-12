@@ -2,6 +2,8 @@
 
 Last updated: 2026-02-02
 
+> Note: this file contains historical planning context. Current implementation status lives in `docs/PROGRESS.md` (updated 2026-02-11).
+
 ## North Star
 Autonomous trading assistant for prediction markets with strong guardrails:
 - AI makes trade decisions autonomously
@@ -75,8 +77,8 @@ See: `docs/AUGUR_IMPLEMENTATION.md`
 **Phase 3: On-Chain Data**
 - [ ] Coinglass integration (funding rates, OI, liquidations)
 - [ ] Whale Alert integration (large transactions)
-- [x] On-chain signal scoring (neutral placeholder)
-- [x] Add to signal fusion (neutral when disabled)
+- [x] On-chain signal scoring (live Hyperliquid funding/orderflow/book inputs)
+- [x] Add to signal fusion (neutral fallback when data unavailable/disabled)
 
 **Phase 4: Strategy Framework**
 - [x] Strategy interface (entry/exit conditions, risk params)

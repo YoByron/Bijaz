@@ -39,6 +39,7 @@ import { getEvaluationSummary } from '../core/evaluation.js';
 import { runOrchestrator } from '../agent/orchestrator/orchestrator.js';
 import { AgentToolRegistry } from '../agent/tools/registry.js';
 import { registerAllTools } from '../agent/tools/adapters/index.js';
+import { loadSkillsIntoRegistry } from '../skills/loader.js';
 import { loadThufirIdentity } from '../agent/identity/identity.js';
 import type { ToolExecution } from '../agent/tools/types.js';
 import type { AgentPlan } from '../agent/planning/types.js';
@@ -529,12 +530,55 @@ env
           detail: error instanceof Error ? error.message : 'unknown error',
         });
       }
+
+      try {
+        const openOrders = await client.getOpenOrders();
+        checks.push({
+          name: 'Open orders',
+          ok: Array.isArray(openOrders),
+          detail: Array.isArray(openOrders)
+            ? `${openOrders.length} open order(s)`
+            : 'unexpected payload shape',
+        });
+      } catch (error) {
+        checks.push({
+          name: 'Open orders',
+          ok: false,
+          detail: error instanceof Error ? error.message : 'unknown error',
+        });
+      }
+
+      try {
+        client.getExchangeClient();
+        checks.push({
+          name: 'Exchange signer',
+          ok: true,
+          detail: 'private key loaded',
+        });
+      } catch (error) {
+        checks.push({
+          name: 'Exchange signer',
+          ok: false,
+          detail: error instanceof Error ? error.message : 'unknown error',
+        });
+      }
     } else {
       checks.push({
         name: 'Account state',
         ok: false,
         detail:
           'missing HYPERLIQUID_ACCOUNT_ADDRESS/HYPERLIQUID_PRIVATE_KEY (required for authenticated checks)',
+      });
+      checks.push({
+        name: 'Open orders',
+        ok: false,
+        detail:
+          'missing HYPERLIQUID_ACCOUNT_ADDRESS/HYPERLIQUID_PRIVATE_KEY (required for authenticated checks)',
+      });
+      checks.push({
+        name: 'Exchange signer',
+        ok: false,
+        detail: 'missing HYPERLIQUID_PRIVATE_KEY',
       });
     }
 
@@ -1436,6 +1480,7 @@ agent
   .description('Run the agentic orchestrator on a goal')
   .argument('<goal...>', 'Goal or request for the agent')
   .option('--mode <mode>', 'Force mode: chat | trade | mentat')
+  .option('-y, --yes', 'Auto-approve confirmation-required tools (DANGEROUS)', false)
   .option('--show-plan', 'Show plan trace')
   .option('--show-tools', 'Show tool trace')
   .option('--show-critic', 'Show critic notes')
@@ -1476,6 +1521,13 @@ agent
 
     const registry = new AgentToolRegistry();
     registerAllTools(registry);
+    // Optional plugin skills (workspace-local).
+    if (config.agent?.workspace) {
+      await loadSkillsIntoRegistry({
+        registry,
+        roots: [join(String(config.agent.workspace), 'skills')],
+      });
+    }
     const identity = loadThufirIdentity({
       workspacePath: config.agent?.workspace,
     }).identity;
@@ -1493,6 +1545,21 @@ agent
             toolRegistry: registry,
             identity,
             toolContext,
+            onConfirmation: async (promptText, toolName, input) => {
+              if (options.yes) {
+                console.log(`Auto-approved: ${toolName}`);
+                return true;
+              }
+              const answer = await inquirer.prompt([
+                {
+                  type: 'confirm',
+                  name: 'confirm',
+                  message: `${promptText}\nTool: ${toolName}\nInput: ${JSON.stringify(input).slice(0, 400)}\nProceed?`,
+                  default: false,
+                },
+              ]);
+              return Boolean(answer.confirm);
+            },
           },
           {
             forceMode: options.mode,
