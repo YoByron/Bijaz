@@ -403,8 +403,8 @@ export function createAgenticExecutorClient(
     config.agent.model;
   if (provider === 'anthropic') {
     const primary = new AgenticAnthropicClient(config, toolContext, model);
-    const fallbackModel = config.agent.openaiModel ?? config.agent.fallbackModel ?? 'gpt-5.2';
-    const fallback = new AgenticOpenAiClient(config, toolContext, fallbackModel);
+    const fallbackModel = config.agent.fallbackModel ?? 'claude-3-5-haiku-20241022';
+    const fallback = new AgenticAnthropicClient(config, toolContext, fallbackModel);
     return wrapWithLimiter(
       wrapWithInfra(new FallbackLlmClient(primary, fallback, isRateLimitError, config), config)
     );
@@ -433,7 +433,7 @@ export function createTrivialTaskClient(config: ThufirConfig): LlmClient | null 
     });
 
     // Prefer local for trivial tasks, but do not block interactive paths on slow local inference.
-    // If local cannot answer quickly, fall back to OpenAI for the same trivial task.
+    // If local cannot answer quickly, fall back to a remote provider for the same trivial task.
     const localSoftTimeoutMs = 5_000;
     const localDefaults: LlmClientOptions = {
       temperature: defaults.temperature,
@@ -448,10 +448,12 @@ export function createTrivialTaskClient(config: ThufirConfig): LlmClient | null 
     };
 
     const primary = new TrivialTaskClient(guarded, localDefaults);
-    const fallback = new TrivialTaskClient(
-      new OpenAiClient(config, config.agent.openaiModel ?? config.agent.model, 'trivial'),
-      defaults
-    );
+    // Under llm-mux proxy, OpenAI requests may be unsupported; use Anthropic as the default remote fallback.
+    const fallbackRemote =
+      config.agent.provider === 'anthropic' || config.agent.useProxy
+        ? new AnthropicClient(config, config.agent.fallbackModel ?? 'claude-3-5-haiku-20241022', 'trivial')
+        : new OpenAiClient(config, config.agent.openaiModel ?? config.agent.model, 'trivial');
+    const fallback = new TrivialTaskClient(fallbackRemote, defaults);
 
     return wrapWithLimiter(
       wrapWithInfra(
@@ -1560,7 +1562,11 @@ export function isRateLimitError(error: unknown): boolean {
 
 function createAnthropicClientWithFallback(config: ThufirConfig): LlmClient {
   const primary = new AnthropicClient(config);
-  const fallbackModel = config.agent.openaiModel ?? config.agent.fallbackModel ?? 'gpt-5.2';
-  const fallback = new OpenAiClient(config, fallbackModel);
+
+  // When using a proxy (llm-mux), OpenAI-shaped requests may not be supported.
+  // Prefer an Anthropic fallback model instead of switching providers.
+  const fallbackModel =
+    config.agent.fallbackModel ?? 'claude-3-5-haiku-20241022';
+  const fallback = new AnthropicClient(config, fallbackModel);
   return new FallbackLlmClient(primary, fallback, isRateLimitError, config);
 }

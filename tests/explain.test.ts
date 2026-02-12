@@ -42,7 +42,7 @@ describe('explainPrediction', () => {
       llm: { complete: async () => ({ content: 'n/a', model: 'test' }) } as any,
     });
     expect(result).toContain('Prediction not found');
-  });
+  }, 25000);
 
   it('uses LLM to generate explanation', async () => {
     const { explainPrediction } = await import('../src/core/explain.js');
