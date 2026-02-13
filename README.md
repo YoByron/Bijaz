@@ -420,6 +420,73 @@ thufir markets sync --limit 200
 thufir trade buy "French Election - Le Pen" YES 0.35 --amount 50
 ```
 
+### Thufir Command Reference
+
+Use `thufir --help` for top-level help and `thufir <command> --help` for details.
+
+```bash
+# Environment
+thufir env init
+thufir env check
+thufir env verify-live --symbol BTC
+
+# Wallet
+thufir wallet create
+thufir wallet import
+thufir wallet status
+thufir wallet limits show
+thufir wallet limits set --daily-loss-usd 100 --max-trade-usd 50 --max-open-trades 5
+
+# Markets & portfolio
+thufir markets list
+thufir markets show <id>
+thufir markets sync --limit 200
+thufir markets watch <id>
+thufir markets watchlist
+thufir portfolio
+
+# Intel
+thufir intel status
+thufir intel search <query>
+thufir intel recent --limit 20
+thufir intel alerts --limit 50
+thufir intel fetch
+thufir intel proactive --max-queries 8
+thufir intel proactive-stats --limit 20
+
+# Analysis & reporting
+thufir briefing
+thufir analyze <market>
+thufir ask <topic>
+thufir top10
+thufir ta <symbol>
+thufir signals
+thufir strategy <name>
+thufir calibration show
+thufir pnl
+thufir eval
+thufir mentat scan
+thufir mentat report
+
+# Agent / autonomy
+thufir agent run --mode trade "<instruction>"
+thufir auto status
+thufir auto on
+thufir auto off
+thufir auto report
+
+# Chat, user, memory, gateway, debug
+thufir chat "<message>"
+thufir user show <id>
+thufir user set <id> --domains politics,crypto --risk moderate --pref timezone=EST
+thufir memory sessions
+thufir memory show <userId> -l 50
+thufir memory compact <userId>
+thufir memory prune --days 90
+thufir gateway
+thufir debug whoami
+```
+
 ### Cloud Install (Hetzner / Ubuntu)
 
 Use the installer script to set up Node 22, install dependencies, generate config + .env,
