@@ -1375,11 +1375,22 @@ async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
       summary: Record<string, unknown>;
     } | null = null;
     let perpError: string | null = null;
+    let spotBalances: {
+      balances: Array<Record<string, unknown>>;
+      escrows: Array<Record<string, unknown>>;
+      summary: Record<string, unknown>;
+    } | null = null;
+    let spotError: string | null = null;
     if (hasHyperliquid) {
       try {
         perpPositions = await loadPerpPositions(ctx);
       } catch (error) {
         perpError = error instanceof Error ? error.message : 'Unknown error';
+      }
+      try {
+        spotBalances = await loadSpotBalances(ctx);
+      } catch (error) {
+        spotError = error instanceof Error ? error.message : 'Unknown error';
       }
     }
 
@@ -1397,6 +1408,10 @@ async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
         perp_positions: perpPositions?.positions ?? [],
         perp_summary: perpPositions?.summary ?? null,
         perp_error: perpError,
+        spot_balances: spotBalances?.balances ?? [],
+        spot_escrows: spotBalances?.escrows ?? [],
+        spot_summary: spotBalances?.summary ?? null,
+        spot_error: spotError,
       },
     };
   } catch (error) {
@@ -1490,6 +1505,74 @@ async function loadPerpPositions(
       ),
       cross_maintenance_margin_used: toNumber(state.crossMaintenanceMarginUsed),
       withdrawable: toNumber(state.withdrawable),
+    },
+  };
+}
+
+async function loadSpotBalances(
+  ctx: ToolExecutorContext
+): Promise<{
+  balances: Array<{
+    coin: string;
+    token: number | null;
+    total: number | null;
+    hold: number | null;
+    free: number | null;
+    entry_notional: number | null;
+  }>;
+  escrows: Array<{
+    coin: string;
+    token: number | null;
+    total: number | null;
+  }>;
+  summary: {
+    tokens: number;
+    total_free: number;
+    total_hold: number;
+  };
+}> {
+  const client = new HyperliquidClient(ctx.config);
+  const state = (await client.getSpotClearinghouseState()) as {
+    balances?: Array<Record<string, unknown>>;
+    evmEscrows?: Array<Record<string, unknown>>;
+  };
+
+  const toNumber = (value: unknown): number | null => {
+    const num = Number(value);
+    return Number.isFinite(num) ? num : null;
+  };
+
+  const balances = (state.balances ?? []).map((b) => {
+    const total = toNumber((b as { total?: unknown }).total);
+    const hold = toNumber((b as { hold?: unknown }).hold);
+    const free =
+      total != null && hold != null ? Math.max(0, total - hold) : null;
+    return {
+      coin: String((b as { coin?: unknown }).coin ?? ''),
+      token: toNumber((b as { token?: unknown }).token),
+      total,
+      hold,
+      free,
+      entry_notional: toNumber((b as { entryNtl?: unknown }).entryNtl),
+    };
+  });
+
+  const escrows = (state.evmEscrows ?? []).map((e) => ({
+    coin: String((e as { coin?: unknown }).coin ?? ''),
+    token: toNumber((e as { token?: unknown }).token),
+    total: toNumber((e as { total?: unknown }).total),
+  }));
+
+  const totalFree = balances.reduce((sum, b) => sum + (b.free ?? 0), 0);
+  const totalHold = balances.reduce((sum, b) => sum + (b.hold ?? 0), 0);
+
+  return {
+    balances,
+    escrows,
+    summary: {
+      tokens: balances.length,
+      total_free: totalFree,
+      total_hold: totalHold,
     },
   };
 }

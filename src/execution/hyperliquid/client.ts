@@ -5,6 +5,7 @@ import type {
   L2BookResponse,
   MetaAndAssetCtxsResponse,
   RecentTradesResponse,
+  SpotClearinghouseStateResponse,
 } from '@nktkas/hyperliquid/api/info';
 import { privateKeyToAccount } from 'viem/accounts';
 
@@ -128,5 +129,17 @@ export class HyperliquidClient {
       );
     }
     return this.info.clearinghouseState({ user });
+  }
+
+  async getSpotClearinghouseState(params?: {
+    dex?: string;
+  }): Promise<SpotClearinghouseStateResponse> {
+    const user = this.getAccountAddress();
+    if (!user) {
+      throw new Error(
+        'Hyperliquid account address not configured (hyperliquid.accountAddress or HYPERLIQUID_ACCOUNT_ADDRESS).'
+      );
+    }
+    return this.info.spotClearinghouseState({ user, dex: params?.dex });
   }
 }
