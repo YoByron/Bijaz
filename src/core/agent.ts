@@ -228,6 +228,35 @@ export class ThufirAgent {
       return JSON.stringify(profile, null, 2);
     }
 
+    // Command: /journal [symbol] [limit] - List recent perp trade journal entries
+    if (trimmed.startsWith('/journal')) {
+      const payload = trimmed.replace('/journal', '').trim();
+      const [symbolRaw, limitRaw] = payload.split(/\s+/).filter(Boolean);
+      const symbol = symbolRaw ? String(symbolRaw).trim().toUpperCase() : undefined;
+      const limit = limitRaw ? Number(limitRaw) : 20;
+      const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 100) : 20;
+      try {
+        const { listPerpTradeJournals } = await import('../memory/perp_trade_journal.js');
+        const entries = listPerpTradeJournals({ symbol, limit: safeLimit });
+        if (entries.length === 0) {
+          return symbol
+            ? `No perp trade journal entries found for ${symbol}.`
+            : 'No perp trade journal entries yet.';
+        }
+        const lines = entries.map((e) => {
+          const side = e.side ?? 'n/a';
+          const sz = e.size != null ? e.size.toFixed(4) : 'n/a';
+          const lev = e.leverage != null ? `${Number(e.leverage).toFixed(2)}x` : 'n/a';
+          const outcome = e.outcome;
+          const msg = e.error ?? e.message ?? '';
+          return `- ${e.symbol} ${side} size=${sz} lev=${lev} outcome=${outcome}${msg ? ` | ${msg}` : ''}`;
+        });
+        return `Perp Trade Journal (latest ${entries.length})\n\n${lines.join('\n')}`;
+      } catch (error) {
+        return `Failed to load journal: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      }
+    }
+
     // Command: /persona [mode|list|off]
     if (trimmed.startsWith('/persona')) {
       const payload = trimmed.replace('/persona', '').trim();
