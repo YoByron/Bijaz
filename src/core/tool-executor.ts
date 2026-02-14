@@ -811,7 +811,6 @@ export async function executeToolCall(
               notionalUsd,
             },
           });
-
           // Best-effort: record envelope + place exchange-side TP/SL triggers for any non-reduce-only entry.
           if (!reduceOnly && typeof market.markPrice === 'number' && market.markPrice > 0) {
             let entryPrice = market.markPrice;
@@ -943,7 +942,6 @@ export async function executeToolCall(
           return { success: false, error: message };
         }
       }
-
       case 'perp_analyze': {
         const symbol = String(toolInput.symbol ?? '').trim();
         const horizon = String(toolInput.horizon ?? '').trim();

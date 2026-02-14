@@ -350,7 +350,6 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
         }
       }
       const size = markPrice > 0 ? probeUsd / markPrice : probeUsd;
-
       const riskCheck = await checkPerpRiskLimits({
         config: this.thufirConfig,
         symbol,

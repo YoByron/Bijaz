@@ -106,7 +106,6 @@ export class Thufir {
     });
     const infoLlm = createTrivialTaskClient(config) ?? undefined;
     this.conversation = new ConversationHandler(this.llm, this.marketClient, config, infoLlm);
-
     this.tradeManagement = new TradeManagementService({
       config,
       marketClient: this.marketClient,
