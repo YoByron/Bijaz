@@ -359,6 +359,7 @@ class RateLimitFailoverClient implements LlmClient {
     let lastError: unknown = null;
     for (let i = 0; i < this.candidates.length; i += 1) {
       const candidate = this.candidates[i];
+      if (!candidate) continue;
       const meta = candidate.meta ?? { provider: 'unknown', model: 'unknown' };
       const cooldown = meta.provider !== 'unknown' && meta.model !== 'unknown'
         ? isCooling(meta.provider, meta.model)
@@ -1733,15 +1734,4 @@ export function isRateLimitError(error: unknown): boolean {
     message.includes('circuit open') ||
     message.includes('circuit breaker')
   );
-}
-
-function createAnthropicClientWithFallback(config: ThufirConfig): LlmClient {
-  const primary = new AnthropicClient(config);
-
-  // When using a proxy (llm-mux), OpenAI-shaped requests may not be supported.
-  // Prefer an Anthropic fallback model instead of switching providers.
-  const fallbackModel =
-    config.agent.fallbackModel ?? 'claude-3-5-haiku-20241022';
-  const fallback = new AnthropicClient(config, fallbackModel);
-  return new FallbackLlmClient(primary, fallback, isRateLimitError, config);
 }
