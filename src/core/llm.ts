@@ -388,15 +388,17 @@ class RateLimitFailoverClient implements LlmClient {
 
       try {
         const response = await candidate.complete(messages, options);
-        // In non-critical contexts, InfraLlmClient may return an empty response on cooldown. If that
-        // happened concurrently, keep trying other routes.
-        if (
-          response.content.trim().length === 0 &&
-          meta.provider !== 'unknown' &&
-          meta.model !== 'unknown' &&
-          isCooling(meta.provider, meta.model)
-        ) {
-          continue;
+        const empty = response.content.trim().length === 0;
+        if (empty) {
+          // Treat empty output as a soft failure. This can happen when a proxy returns an
+          // "ok" response with no assistant text, or when infra suppresses calls.
+          this.logger.warn('LLM returned empty response; trying next route', {
+            from: meta,
+            to: (this.candidates[i + 1]?.meta ?? { provider: 'unknown', model: 'unknown' }),
+          });
+          if (this.candidates[i + 1]) {
+            continue;
+          }
         }
         return response;
       } catch (error) {
