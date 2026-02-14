@@ -2654,7 +2654,6 @@ function resolveQmdCommand(): string {
   if (fromEnv) return fromEnv;
 
   const candidates = [
-    'qmd',
     join(homedir(), '.local', 'bin', 'qmd'),
     join(homedir(), '.bun', 'bin', 'qmd'),
     '/usr/local/bin/qmd',
@@ -2662,7 +2661,6 @@ function resolveQmdCommand(): string {
   ];
 
   for (const candidate of candidates) {
-    if (candidate === 'qmd') return candidate; // allow PATH resolution first
     try {
       if (existsSync(candidate)) {
         accessSync(candidate, fsConstants.X_OK);
@@ -2673,6 +2671,7 @@ function resolveQmdCommand(): string {
     }
   }
 
+  // Fall back to PATH resolution.
   return 'qmd';
 }
 
