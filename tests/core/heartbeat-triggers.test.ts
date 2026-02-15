@@ -61,5 +61,28 @@ describe('heartbeat triggers', () => {
     });
     expect(fired).toContain('volatility_spike');
   });
-});
 
+  it('respects cooldown for repeated triggers', () => {
+    const now = Date.now();
+    const state = new Map<any, any>();
+    const points: HeartbeatPoint[] = [
+      { ts: now - 2000, mid: 100, roePct: 0, liqDistPct: 4.9 },
+      { ts: now - 1000, mid: 100, roePct: 0, liqDistPct: 4.9 },
+    ];
+    const first = evaluateHeartbeatTriggers({
+      points,
+      cfg: baseCfg,
+      nowMs: now,
+      lastFiredByTrigger: state,
+    });
+    expect(first).toContain('liquidation_proximity');
+
+    const second = evaluateHeartbeatTriggers({
+      points,
+      cfg: baseCfg,
+      nowMs: now + 1000,
+      lastFiredByTrigger: state,
+    });
+    expect(second).not.toContain('liquidation_proximity');
+  });
+});
