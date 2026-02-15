@@ -198,12 +198,17 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       return 'Daily spending limit reached. No trades executed.';
     }
 
-    const executeTrades = Boolean(options?.forceExecute) || this.config.fullAuto;
+    const forceExecute = Boolean(options?.forceExecute);
+    const executeTrades = forceExecute || this.config.fullAuto;
     const maxTrades = options?.maxTrades;
-    return this.runDiscoveryScan({ executeTrades, maxTrades });
+    return this.runDiscoveryScan({ executeTrades, maxTrades, ignoreThresholds: forceExecute });
   }
 
-  private async runDiscoveryScan(input: { executeTrades: boolean; maxTrades?: number }): Promise<string> {
+  private async runDiscoveryScan(input: {
+    executeTrades: boolean;
+    maxTrades?: number;
+    ignoreThresholds?: boolean;
+  }): Promise<string> {
     const result = await runDiscovery(this.thufirConfig);
     if (result.expressions.length === 0) {
       return 'No discovery expressions generated.';
@@ -218,7 +223,10 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       return `Discovery scan completed:\n${lines.join('\n')}`;
     }
 
-    const eligible = result.expressions.filter((expr) => {
+    const eligible = (input.ignoreThresholds ? result.expressions : result.expressions).filter((expr) => {
+      if (input.ignoreThresholds) {
+        return true;
+      }
       if (expr.expectedEdge < this.config.minEdge) {
         return false;
       }
@@ -231,10 +239,15 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       return 'No expressions met autonomy thresholds (minEdge/confidence).';
     }
 
+    // If we're forcing execution, pick the "best" expression first (highest expected edge).
+    const ranked = input.ignoreThresholds
+      ? [...eligible].sort((a, b) => (b.expectedEdge ?? 0) - (a.expectedEdge ?? 0))
+      : eligible;
+
     const maxTrades = Number.isFinite(input.maxTrades)
       ? Math.min(Math.max(Number(input.maxTrades), 1), 10)
       : this.config.maxTradesPerScan;
-    const toExecute = eligible.slice(0, maxTrades);
+    const toExecute = ranked.slice(0, maxTrades);
     const outputs: string[] = [];
 
     for (const expr of toExecute) {
