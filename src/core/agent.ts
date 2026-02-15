@@ -160,6 +160,14 @@ export class ThufirAgent {
     return this.autonomous;
   }
 
+  /**
+   * Gateway-level services (e.g. position heartbeat) may need access to the same execution context
+   * (executor + limiter) without going through the full agentic loop.
+   */
+  getToolContext(): ToolExecutorContext {
+    return this.toolContext;
+  }
+
   async handleMessage(sender: string, text: string): Promise<string> {
     const trimmed = text.trim();
     const isQuestion = this.isQuestion(trimmed);

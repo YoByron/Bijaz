@@ -22,6 +22,7 @@ import { formatProactiveSummary, runProactiveSearch } from '../core/proactive_se
 import { buildAgentPeerSessionKey, resolveThreadSessionKeys } from './session_keys.js';
 import { createAgentRegistry } from './agent_router.js';
 import { createLlmClient } from '../core/llm.js';
+import { PositionHeartbeatService } from '../core/position_heartbeat.js';
 
 const config = loadConfig();
 const rawLevel = (process.env.THUFIR_LOG_LEVEL ?? 'info').toLowerCase();
@@ -43,6 +44,15 @@ const whatsapp = config.channels.whatsapp.enabled ? new WhatsAppAdapter(config) 
 
 for (const instance of agentRegistry.agents.values()) {
   instance.start();
+}
+
+const positionHeartbeat =
+  config.heartbeat?.enabled === true
+    ? new PositionHeartbeatService({ toolContext: defaultAgent.getToolContext(), logger })
+    : null;
+if (positionHeartbeat) {
+  positionHeartbeat.start();
+  logger.info('Position heartbeat started');
 }
 
 // Market cache is refreshed on schedule (no websocket stream configured).

@@ -201,6 +201,27 @@ autonomy:
   dailyReportTime: "20:00"     # Time to send daily P&L report
   maxTradesPerScan: 3          # Max trades per scan cycle
 
+# Position heartbeat (manages open positions between user messages)
+heartbeat:
+  enabled: false
+  tickIntervalSeconds: 30          # Layer 1 polling frequency (while positions are open)
+  rollingBufferSize: 60            # ticks to keep in memory
+  triggers:
+    pnlShiftPct: 1.5
+    approachingStopPct: 1.0
+    approachingTpPct: 1.0
+    liquidationProximityPct: 5.0
+    fundingSpike: 0.0001
+    volatilitySpikePct: 2.0
+    volatilitySpikeWindowTicks: 10  # 10 ticks * 30s = 5 min
+    timeCeilingMinutes: 15
+    triggerCooldownSeconds: 180
+  llm:
+    provider: null                  # null = use agent's default provider
+    model: null                     # null = use agent's default model
+    maxTokens: 1024
+    maxCallsPerHour: 20
+
 # Trade management (mechanical exits + journal learning)
 tradeManagement:
   enabled: true
