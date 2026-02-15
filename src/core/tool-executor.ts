@@ -2696,7 +2696,9 @@ async function qmdQuery(
   ctx: ToolExecutorContext
 ): Promise<ToolResult> {
   const query = String(toolInput.query ?? '').trim();
-  const mode = String(toolInput.mode ?? 'query');
+  // Default to BM25 search. QMD "query" can hang when collections/embeddings are not initialized.
+  // Users/LLM can still explicitly request hybrid mode via mode="query".
+  const mode = String(toolInput.mode ?? 'search');
   const limit = Math.min(Math.max(Number(toolInput.limit ?? 10), 1), 50);
   const collection = toolInput.collection ? String(toolInput.collection) : undefined;
 
