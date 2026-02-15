@@ -27,6 +27,19 @@ function parseJsonObject<T>(value: string | null): T | null {
 
 export function recordTradeEnvelope(envelope: TradeEnvelope): void {
   const db = openDatabase();
+  // Hyperliquid perps are netted per symbol (one position per coin). Multiple open envelopes
+  // for the same symbol create duplicate close records and break loss-streak logic.
+  // Enforce at-most-one open envelope per symbol by closing any older open envelopes.
+  if (envelope.status === 'open') {
+    db.prepare(
+      `
+        UPDATE trade_envelopes
+        SET updated_at = @updatedAt,
+            status = 'closed'
+        WHERE symbol = @symbol AND status = 'open' AND trade_id != @tradeId
+      `
+    ).run({ updatedAt: toIsoNow(), symbol: envelope.symbol, tradeId: envelope.tradeId });
+  }
   db.prepare(
     `
       INSERT OR REPLACE INTO trade_envelopes (
