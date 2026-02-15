@@ -72,14 +72,25 @@ function passesSignalConvergence(config: ThufirConfig, cluster: SignalCluster): 
   const bias = cluster.directionalBias;
   let count = 0;
   let weighted = 0;
+  let maxPossibleWeighted = 0;
+  let maxPossibleCount = 0;
   for (const s of cluster.signals) {
     if (s.directionalBias === 'neutral') continue;
     if (bias === 'up' && s.directionalBias !== 'up') continue;
     if (bias === 'down' && s.directionalBias !== 'down') continue;
     count += 1;
-    weighted += resolveSignalWeight(config, s.kind);
+    const w = resolveSignalWeight(config, s.kind);
+    weighted += w;
+    maxPossibleWeighted += w;
+    maxPossibleCount += 1;
   }
-  return count >= minCount && weighted >= threshold;
+
+  // Prevent "no trades ever" deadlocks when config threshold is higher than the maximum
+  // achievable weight from the signals actually produced for this cluster.
+  const effectiveThreshold = Math.min(threshold, maxPossibleWeighted);
+  const effectiveMinCount = Math.min(minCount, maxPossibleCount);
+
+  return count >= effectiveMinCount && weighted >= effectiveThreshold;
 }
 
 export async function runDiscovery(config: ThufirConfig): Promise<{
