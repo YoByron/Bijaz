@@ -174,6 +174,28 @@ export class ThufirAgent {
     const isCapabilityQuestion = this.isCapabilityQuestion(trimmed);
     const isAccessQuestion = this.isAccessQuestion(trimmed);
 
+    // Natural language "background monitoring" / autonomy affirmation shouldn't rely on the LLM.
+    // These messages tend to arrive when rate limits are active; respond deterministically.
+    const wantsBackgroundAutonomy =
+      /\b(background|keep\s+monitoring|monitor(ing)?\s+(my\s+)?(trades?|positions?)|run\s+in\s+the\s+background|keep\s+watching|always\s+watch)\b/i.test(
+        trimmed
+      ) ||
+      /\bremember\b.*\b(autonomous\s+agent|fully\s+autonomous)\b/i.test(trimmed);
+    if (wantsBackgroundAutonomy) {
+      const autonomyEnabled = (this.config.autonomy as any)?.enabled === true;
+      const status = this.autonomous.getStatus();
+      if (!autonomyEnabled) {
+        return 'Autonomous trading is disabled in config. Set `autonomy.enabled: true`, then use /fullauto on.';
+      }
+      const mode = status.fullAuto ? 'Full auto: ON' : 'Full auto: OFF (report-only)';
+      const paused = status.isPaused ? `Paused: YES (${status.pauseReason})` : 'Paused: NO';
+      return [
+        'Autonomy is running in the background.',
+        `${mode}. ${paused}.`,
+        'Use /status to see live PnL/trade count, /pause to stop, /resume to continue.',
+      ].join('\n');
+    }
+
     // Natural language "enable full auto" should not go through the LLM/tool loop.
     // This prevents "allowed number of steps" failures on vague confirmations like "Go for it."
     const nlFullAutoOn =
@@ -640,6 +662,17 @@ Just type naturally to chat about markets, risks, or positioning.
       return await this.conversation.chat(sender, trimmed);
     } catch (error) {
       this.logger.error('Conversation error', error);
+      const msg = error instanceof Error ? error.message : String(error);
+      const lower = msg.toLowerCase();
+      const isTimeout = lower.includes('timed out') || lower.includes('timeout');
+      const isRateLimit =
+        lower.includes('rate limit') || lower.includes('429') || lower.includes('cooldown');
+      if (isTimeout || isRateLimit) {
+        return [
+          'LLM is temporarily unavailable (rate limit/timeout).',
+          'Autonomy is still running in the background; use /status.',
+        ].join(' ');
+      }
       return `Sorry, I encountered an error. Try again or use /help for commands.`;
     }
   }
