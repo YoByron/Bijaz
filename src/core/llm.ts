@@ -956,12 +956,89 @@ async function fetchWithRetry(factory: () => Promise<FetchResponse>): Promise<Fe
   return factory();
 }
 
+// ---------------------------------------------------------------------------
+// Text-based tool calling helpers (proxy fallback)
+// ---------------------------------------------------------------------------
+// Some proxies strip the OpenAI `tools` parameter. When that happens, we fall
+// back to a text protocol: the model emits <tool_call>{...}</tool_call> blocks.
+
+interface TextToolCall {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+function buildTextToolPrompt(): string {
+  const toolDefs = THUFIR_TOOLS.map((tool) => {
+    const schema = tool.input_schema as {
+      properties?: Record<string, { type?: string; description?: string; enum?: string[] }>;
+      required?: string[];
+    };
+    const props = schema.properties ?? {};
+    const required = new Set(schema.required ?? []);
+    const paramLines = Object.entries(props).map(([name, prop]) => {
+      const req = required.has(name) ? '' : '?';
+      const enumPart = prop.enum ? ` [${prop.enum.join(', ')}]` : '';
+      return `    ${name}${req} (${prop.type ?? 'any'}${enumPart}): ${prop.description ?? ''}`;
+    });
+    const paramsBlock = paramLines.length > 0 ? '\n' + paramLines.join('\n') : '';
+    return `- **${tool.name}**: ${tool.description}${paramsBlock}`;
+  }).join('\n');
+
+  return `## Available Tools
+
+To call a tool, output a <tool_call> block:
+
+<tool_call>
+{"name": "tool_name", "arguments": {"key": "value"}}
+</tool_call>
+
+IMPORTANT:
+- Each tool call MUST be a separate <tool_call> block with exactly one tool name.
+- Do NOT combine tool names (e.g. "tool_a + tool_b" is WRONG).
+- Wait for results; never fabricate outputs.
+
+${toolDefs}`;
+}
+
+function parseTextToolCalls(text: string): TextToolCall[] {
+  const regex = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+  const calls: TextToolCall[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    try {
+      const raw = match[1] ?? '';
+      const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+      const parsed = JSON.parse(cleaned) as { name?: unknown; arguments?: unknown };
+      if (typeof parsed.name !== 'string') continue;
+      const args =
+        typeof parsed.arguments === 'object' && parsed.arguments !== null ? (parsed.arguments as Record<string, unknown>) : {};
+
+      // Detect and split "tool_a + tool_b + ..." concatenated names.
+      if (parsed.name.includes('+')) {
+        const names = parsed.name
+          .split(/\s*\+\s*/)
+          .map((n) => n.trim())
+          .filter(Boolean);
+        for (const name of names) {
+          calls.push({ name, arguments: args });
+        }
+      } else {
+        calls.push({ name: parsed.name, arguments: args });
+      }
+    } catch {
+      // ignore parse errors; treat as no call
+    }
+  }
+  return calls;
+}
+
 export class AgenticOpenAiClient implements LlmClient {
   private model: string;
   private baseUrl: string;
   private toolContext: ToolExecutorContext;
   private includeTemperature: boolean;
   private useResponsesApi: boolean;
+  private useTextToolCalling: boolean;
   meta?: LlmClientMeta;
 
   constructor(
@@ -974,10 +1051,17 @@ export class AgenticOpenAiClient implements LlmClient {
     this.toolContext = toolContext;
     this.includeTemperature = !config.agent.useProxy;
     this.useResponsesApi = config.agent.useResponsesApi ?? config.agent.useProxy;
+    // Some proxies strip the native `tools` parameter. In that case, use a
+    // text-based tool calling protocol so tool usage remains reliable.
+    this.useTextToolCalling = config.agent.useProxy ?? false;
     this.meta = { provider: 'openai', model: this.model, kind: 'agentic' };
   }
 
   async complete(messages: ChatMessage[], options?: AgenticLlmOptions): Promise<LlmResponse> {
+    if (this.useTextToolCalling) {
+      return this.completeWithTextTools(messages, options);
+    }
+
     const maxIterations = options?.maxToolCalls ?? 20;
     const temperature = options?.temperature ?? 0.2;
 
@@ -1164,6 +1248,107 @@ export class AgenticOpenAiClient implements LlmClient {
         openaiMessages.push({
           role: 'tool',
           tool_call_id: toolCall.id,
+          content: JSON.stringify(result.success ? result.data : { error: result.error }),
+        });
+      }
+    }
+
+    return {
+      content: 'I was unable to complete the request within the allowed number of steps.',
+      model: this.model,
+    };
+  }
+
+  /**
+   * Text-based tool calling: injects tool definitions into the system prompt
+   * and parses <tool_call> blocks from the model's text response.
+   *
+   * This intentionally uses /v1/chat/completions only (not /v1/responses) for
+   * maximum proxy compatibility, since no native `tools` parameter is required.
+   */
+  private async completeWithTextTools(
+    messages: ChatMessage[],
+    options?: AgenticLlmOptions
+  ): Promise<LlmResponse> {
+    const maxIterations = options?.maxToolCalls ?? 20;
+    const temperature = options?.temperature ?? 0.2;
+
+    const toolPrompt = buildTextToolPrompt();
+    const prelude = loadIdentityPrelude({
+      workspacePath: this.toolContext.config.agent?.workspace,
+      promptMode: resolveIdentityPromptMode(this.toolContext.config, this.meta?.kind),
+      bootstrapMaxChars: this.toolContext.config.agent?.identityBootstrapMaxChars,
+      includeMissing: this.toolContext.config.agent?.identityBootstrapIncludeMissing,
+    }).prelude;
+
+    const conversation: OpenAiMessage[] = injectIdentity(messages, prelude).map((msg) => ({
+      role: msg.role,
+      content: msg.content,
+    }));
+
+    // Inject tool definitions into the system message.
+    const sysIdx = conversation.findIndex((m) => m.role === 'system');
+    if (sysIdx >= 0) {
+      conversation[sysIdx] = {
+        role: 'system',
+        content: `${conversation[sysIdx]!.content}\n\n${toolPrompt}`,
+      };
+    } else {
+      conversation.unshift({ role: 'system', content: toolPrompt });
+    }
+
+    let iteration = 0;
+    while (iteration < maxIterations) {
+      iteration += 1;
+      const response = await fetchWithRetry(() =>
+        fetch(`${this.baseUrl}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.OPENAI_API_KEY ?? ''}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: this.model,
+            ...(this.includeTemperature ? { temperature } : {}),
+            messages: conversation,
+          }),
+        })
+      );
+
+      if (!response.ok) {
+        let detail = '';
+        try {
+          detail = await response.text();
+        } catch {
+          detail = '';
+        }
+        const errorMsg = detail ? parseProxyError(detail) : `status ${response.status}`;
+        throw new Error(`LLM request failed: ${errorMsg}`);
+      }
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string | null } }>;
+      };
+      const text = (data.choices?.[0]?.message?.content ?? '').trim();
+      if (!text) {
+        return { content: '', model: this.model };
+      }
+
+      const calls = parseTextToolCalls(text);
+      if (calls.length === 0) {
+        // Remove any tool call blocks from the final user-facing output.
+        const cleaned = text.replace(/<tool_call>\s*[\s\S]*?\s*<\/tool_call>/g, '').trim();
+        return { content: cleaned, model: this.model };
+      }
+
+      // Record assistant message as-is (tool blocks included) for context.
+      conversation.push({ role: 'assistant', content: text });
+
+      for (const call of calls) {
+        const result = await executeToolCall(call.name, call.arguments, this.toolContext);
+        conversation.push({
+          role: 'tool',
+          tool_call_id: `call_${Date.now()}_${Math.random().toString(16).slice(2)}`,
           content: JSON.stringify(result.success ? result.data : { error: result.error }),
         });
       }
