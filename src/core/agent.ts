@@ -28,6 +28,9 @@ import { runDiscovery } from '../discovery/engine.js';
 import type { ToolExecutorContext } from './tool-executor.js';
 import { withExecutionContext } from './llm_infra.js';
 import { TradeManagementService } from '../trade-management/service.js';
+import { openDatabase } from '../memory/db.js';
+import { HyperliquidClient } from '../execution/hyperliquid/client.js';
+import { listOpenTradeEnvelopes } from '../trade-management/db.js';
 
 export class ThufirAgent {
   private llm: ReturnType<typeof createLlmClient>;
@@ -581,7 +584,72 @@ export class ThufirAgent {
     // Command: /status - Get autonomous mode status
     if (trimmed === '/status') {
       const status = this.autonomous.getStatus();
-      const pnl = this.autonomous.getDailyPnL();
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      const db = openDatabase();
+      const statusRows = db
+        .prepare(
+          `
+            SELECT status, COUNT(*) as n
+            FROM perp_trades
+            WHERE date(created_at) = ?
+            GROUP BY status
+          `
+        )
+        .all(todayUtc) as Array<{ status: string; n: number }>;
+      let attempted = 0;
+      let executed = 0;
+      let failed = 0;
+      for (const row of statusRows) {
+        const n = Number(row.n ?? 0);
+        attempted += n;
+        if (row.status === 'executed') executed += n;
+        if (row.status === 'failed') failed += n;
+      }
+      const closes = db
+        .prepare(
+          `
+            SELECT
+              COUNT(*) as n,
+              SUM(CASE WHEN pnl_usd > 0 THEN 1 ELSE 0 END) as wins,
+              SUM(CASE WHEN pnl_usd < 0 THEN 1 ELSE 0 END) as losses,
+              SUM(pnl_usd) as pnl
+            FROM trade_closes
+            WHERE date(closed_at) = ?
+          `
+        )
+        .get(todayUtc) as { n?: number; wins?: number; losses?: number; pnl?: number } | undefined;
+      const wins = Number(closes?.wins ?? 0);
+      const losses = Number(closes?.losses ?? 0);
+      const realizedPnl = Number(closes?.pnl ?? 0);
+      const openManaged = listOpenTradeEnvelopes().length;
+
+      let accountValueUsd: number | null = null;
+      let unrealizedPnlUsd: number | null = null;
+      try {
+        if (this.config.execution?.mode === 'live' && this.config.execution?.provider === 'hyperliquid') {
+          const client = new HyperliquidClient(this.config);
+          const state = (await client.getClearinghouseState()) as any;
+          const rawValue =
+            state?.marginSummary?.accountValue ??
+            state?.crossMarginSummary?.accountValue ??
+            null;
+          const valueNum = typeof rawValue === 'string' || typeof rawValue === 'number' ? Number(rawValue) : NaN;
+          accountValueUsd = Number.isFinite(valueNum) ? valueNum : null;
+
+          const positions = Array.isArray(state?.assetPositions) ? state.assetPositions : [];
+          let unrl = 0;
+          for (const entry of positions) {
+            const p = entry?.position ?? {};
+            const szi = Number((p as any).szi ?? 0);
+            if (!Number.isFinite(szi) || szi === 0) continue;
+            const pnl = Number((p as any).unrealizedPnl ?? 0);
+            if (Number.isFinite(pnl)) unrl += pnl;
+          }
+          unrealizedPnlUsd = Number.isFinite(unrl) ? unrl : null;
+        }
+      } catch {
+        // Best-effort; keep nulls.
+      }
 
       const lines: string[] = [];
       lines.push('**Thufir Status**');
@@ -593,9 +661,18 @@ export class ThufirAgent {
       lines.push(`• Consecutive losses: ${status.consecutiveLosses}`);
       lines.push('');
       lines.push('**Today\'s Activity:**');
-      lines.push(`• Trades: ${pnl.tradesExecuted} (W:${pnl.wins} L:${pnl.losses} P:${pnl.pending})`);
-      lines.push(`• Realized P&L: ${pnl.realizedPnl >= 0 ? '+' : ''}$${pnl.realizedPnl.toFixed(2)}`);
-      lines.push(`• Remaining budget: $${status.remainingDaily.toFixed(2)}`);
+      lines.push(`• Date (UTC): ${todayUtc}`);
+      lines.push(`• Trade attempts: ${attempted} (executed:${executed} failed:${failed})`);
+      lines.push(`• Closed trades: ${wins + losses} (W:${wins} L:${losses})`);
+      lines.push(`• Realized P&L (closes): ${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`);
+      if (unrealizedPnlUsd != null) {
+        lines.push(`• Unrealized P&L (open): ${unrealizedPnlUsd >= 0 ? '+' : ''}$${unrealizedPnlUsd.toFixed(2)}`);
+      }
+      if (accountValueUsd != null) {
+        lines.push(`• Perps account value: $${accountValueUsd.toFixed(2)}`);
+      }
+      lines.push(`• Open managed positions: ${openManaged}`);
+      lines.push(`• Remaining daily spend limit: $${status.remainingDaily.toFixed(2)}`);
 
       return lines.join('\n');
     }
