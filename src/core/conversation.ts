@@ -15,7 +15,7 @@ import { getUserContext, updateUserContext } from '../memory/user.js';
 import { listRecentIntel, listIntelByIds } from '../intel/store.js';
 import { IntelVectorStore } from '../intel/vectorstore.js';
 import { SessionStore } from '../memory/session_store.js';
-import { storeChatMessage, listChatMessagesByIds, clearChatMessages } from '../memory/chat.js';
+import { storeChatMessage, listChatMessagesByIds, clearChatMessages, searchChatMessagesLexical } from '../memory/chat.js';
 import { ChatVectorStore } from '../memory/chat_vectorstore.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -504,7 +504,9 @@ export class ConversationHandler {
             : Promise.resolve(''),
         ]);
 
-        const history = this.sessions.buildContextMessages(userId, maxHistory);
+        // Prefer small, recent history in the prompt. Older context should come from
+        // summary + retrieval (semantic embeddings or lexical fallback) to reduce latency/cost.
+        const history = this.sessions.buildContextMessages(userId, Math.min(maxHistory, keepRecent));
 
         // Build context
         const userContext = buildUserContext(userId, this.config);
@@ -786,7 +788,7 @@ export class ConversationHandler {
 
   private async buildSemanticChatContext(message: string, _userId: string): Promise<string> {
     if (!this.config.memory?.embeddings?.enabled) {
-      return '';
+      return this.buildLexicalChatContext(message, _userId);
     }
     const hits = await this.chatVectorStore.query(message, 5);
     if (hits.length === 0) {
@@ -799,6 +801,23 @@ export class ConversationHandler {
     const lines: string[] = ['## Relevant Past Conversation'];
     for (const item of items) {
       lines.push(`- ${item.role}: ${item.content.slice(0, 200)}`);
+    }
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private buildLexicalChatContext(message: string, userId: string): string {
+    const sessionId = this.sessions.getSessionId(userId);
+    const hits = searchChatMessagesLexical({ sessionId, query: message, limit: 6 });
+    if (hits.length === 0) {
+      return '';
+    }
+    const lines: string[] = ['## Relevant Past Conversation (Lexical)'];
+    for (const item of hits) {
+      const content = String(item.content ?? '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      lines.push(`- ${item.role}: ${content.slice(0, 220)}`);
     }
     lines.push('');
     return lines.join('\n');

@@ -82,6 +82,15 @@ vi.mock('../../src/memory/chat.js', () => ({
       sessionId: 's1',
     },
   ],
+  searchChatMessagesLexical: () => [
+    {
+      id: 'm1',
+      role: 'user',
+      content: 'Old message',
+      createdAt: '2026-01-26T00:00:00Z',
+      sessionId: 's1',
+    },
+  ],
   clearChatMessages: () => undefined,
   pruneChatMessages: () => 0,
 }));
