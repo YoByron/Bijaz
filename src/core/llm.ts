@@ -318,7 +318,12 @@ class InfraLlmClient implements LlmClient {
 
     try {
       const explicitTimeoutMs = options?.timeoutMs;
-      const timeoutMs = explicitTimeoutMs ?? resolveDefaultLlmTimeoutMs();
+      // OpenAI GPT-5.1 can legitimately exceed the global watchdog timeout during tool-heavy
+      // or long-chain reasoning. If the caller did not explicitly set a timeout, disable the
+      // infra-level timeout for this model to avoid spurious failovers.
+      const disableDefaultTimeout =
+        explicitTimeoutMs === undefined && meta.provider === 'openai' && meta.model.startsWith('gpt-5.1');
+      const timeoutMs = disableDefaultTimeout ? 0 : explicitTimeoutMs ?? resolveDefaultLlmTimeoutMs();
       // Preserve inner-client default timeouts (notably TrivialTaskClient soft timeouts) by
       // only forwarding timeoutMs when the caller explicitly provided one.
       const forwardedOptions =
