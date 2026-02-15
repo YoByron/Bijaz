@@ -188,7 +188,7 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
   /**
    * Run a scan and optionally execute trades
    */
-  async runScan(): Promise<string> {
+  async runScan(options?: { forceExecute?: boolean; maxTrades?: number }): Promise<string> {
     if (this.isPaused) {
       return `Autonomous trading is paused: ${this.pauseReason}`;
     }
@@ -198,16 +198,18 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       return 'Daily spending limit reached. No trades executed.';
     }
 
-    return this.runDiscoveryScan();
+    const executeTrades = Boolean(options?.forceExecute) || this.config.fullAuto;
+    const maxTrades = options?.maxTrades;
+    return this.runDiscoveryScan({ executeTrades, maxTrades });
   }
 
-  private async runDiscoveryScan(): Promise<string> {
+  private async runDiscoveryScan(input: { executeTrades: boolean; maxTrades?: number }): Promise<string> {
     const result = await runDiscovery(this.thufirConfig);
     if (result.expressions.length === 0) {
       return 'No discovery expressions generated.';
     }
 
-    if (!this.config.fullAuto) {
+    if (!input.executeTrades) {
       const top = result.expressions.slice(0, 5);
       const lines = top.map(
         (expr) =>
@@ -229,7 +231,10 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       return 'No expressions met autonomy thresholds (minEdge/confidence).';
     }
 
-    const toExecute = eligible.slice(0, this.config.maxTradesPerScan);
+    const maxTrades = Number.isFinite(input.maxTrades)
+      ? Math.min(Math.max(Number(input.maxTrades), 1), 10)
+      : this.config.maxTradesPerScan;
+    const toExecute = eligible.slice(0, maxTrades);
     const outputs: string[] = [];
 
     for (const expr of toExecute) {
