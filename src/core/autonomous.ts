@@ -254,9 +254,19 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       const symbol = expr.symbol.includes('/') ? expr.symbol.split('/')[0]! : expr.symbol;
       const market = await this.marketClient.getMarket(symbol);
       const markPrice = market.markPrice ?? 0;
-      const probeUsd = Math.min(expr.probeSizeUsd, this.limiter.getRemainingDaily());
+      const minOrderUsd =
+        typeof (this.thufirConfig as any)?.hyperliquid?.minOrderNotionalUsd === 'number'
+          ? Number((this.thufirConfig as any).hyperliquid.minOrderNotionalUsd)
+          : 10;
+      const remainingDaily = this.limiter.getRemainingDaily();
+      const desiredUsd = Number.isFinite(expr.probeSizeUsd) ? expr.probeSizeUsd : 0;
+      const probeUsd = Math.min(Math.max(minOrderUsd, desiredUsd), remainingDaily);
       if (probeUsd <= 0) {
         outputs.push(`${symbol}: Skipped (insufficient daily budget)`);
+        continue;
+      }
+      if (probeUsd < minOrderUsd) {
+        outputs.push(`${symbol}: Skipped (remaining daily budget $${remainingDaily.toFixed(2)} below min order $${minOrderUsd.toFixed(2)})`);
         continue;
       }
       const size = markPrice > 0 ? probeUsd / markPrice : probeUsd;
