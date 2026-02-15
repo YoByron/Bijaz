@@ -28,6 +28,16 @@ export function installConsoleFileMirror(params: { filePath: string }): UnifiedL
   const filePath = expandHome(params.filePath);
   mkdirSync(dirname(filePath), { recursive: true });
   const stream = createWriteStream(filePath, { flags: 'a' });
+  let streamHealthy = true;
+  stream.on('error', (err) => {
+    // If we can't write the mirror file, do not crash the process.
+    streamHealthy = false;
+    try {
+      process.stderr.write(`[unified-logging] mirror stream error: ${String(err)}\n`);
+    } catch {
+      // ignore
+    }
+  });
 
   const original = {
     log: console.log.bind(console),
@@ -38,6 +48,7 @@ export function installConsoleFileMirror(params: { filePath: string }): UnifiedL
 
   const write = (level: Level, args: unknown[]) => {
     try {
+      if (!streamHealthy) return;
       stream.write(serializeLine(level, args));
     } catch {
       // Best-effort only.
@@ -87,4 +98,3 @@ export function installConsoleFileMirror(params: { filePath: string }): UnifiedL
     },
   };
 }
-
