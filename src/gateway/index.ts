@@ -22,9 +22,21 @@ import { formatProactiveSummary, runProactiveSearch } from '../core/proactive_se
 import { buildAgentPeerSessionKey, resolveThreadSessionKeys } from './session_keys.js';
 import { createAgentRegistry } from './agent_router.js';
 import { createLlmClient } from '../core/llm.js';
+import { installConsoleFileMirror } from '../core/unified-logging.js';
 import { PositionHeartbeatService } from '../core/position_heartbeat.js';
 
 const config = loadConfig();
+try {
+  const enabled =
+    String(process.env.THUFIR_LOG_MIRROR ?? '').trim() === '1' ||
+    String(process.env.THUFIR_LOG_FILE ?? '').trim().length > 0;
+  if (enabled) {
+    const filePath = String(process.env.THUFIR_LOG_FILE ?? '').trim() || '~/.thufir/logs/thufir.log';
+    installConsoleFileMirror({ filePath });
+  }
+} catch {
+  // Best-effort: never block startup due to logging.
+}
 const rawLevel = (process.env.THUFIR_LOG_LEVEL ?? 'info').toLowerCase();
 const level =
   rawLevel === 'debug' || rawLevel === 'info' || rawLevel === 'warn' || rawLevel === 'error'
@@ -46,16 +58,25 @@ for (const instance of agentRegistry.agents.values()) {
   instance.start();
 }
 
-const positionHeartbeat =
-  config.heartbeat?.enabled === true
-    ? new PositionHeartbeatService({ toolContext: defaultAgent.getToolContext(), logger })
-    : null;
-if (positionHeartbeat) {
-  positionHeartbeat.start();
-  logger.info('Position heartbeat started');
+const positionHeartbeatConfig = config.heartbeat;
+if (positionHeartbeatConfig?.enabled) {
+  try {
+    const service = new PositionHeartbeatService(config, defaultAgent.getToolContext(), logger);
+    service.start();
+  } catch (error) {
+    logger.error('PositionHeartbeat failed to start', error);
+  }
 }
 
 // Market cache is refreshed on schedule (no websocket stream configured).
+
+function stripIdentityIntro(text: string): string {
+  // The model sometimes prepends a redundant identity line. Strip only at the start.
+  // Keep this narrow to avoid accidentally removing real content.
+  return text
+    .replace(/^\s*(I['’]m|I am)\s+Thufir\s+Hawat\.\s*(\r?\n)+/i, '')
+    .replace(/^\s*(I['’]m|I am)\s+Thufir\s+Hawat\.\s*/i, '');
+}
 
 const onIncoming = async (
   message: {
@@ -80,7 +101,8 @@ const onIncoming = async (
     baseSessionKey: sessionKey,
     threadId: message.threadId,
   }).sessionKey;
-  const reply = await activeAgent.handleMessage(session, message.text);
+  const replyRaw = await activeAgent.handleMessage(session, message.text);
+  const reply = stripIdentityIntro(replyRaw);
   if (!reply || reply.trim().length === 0) {
     logger.warn(`Empty reply for ${message.channel}:${message.senderId}`);
     return;
@@ -607,16 +629,10 @@ if (config.qmd?.enabled && qmdEmbedConfig?.enabled) {
 
   const runQmdEmbed = async () => {
     try {
-      const home = process.env.HOME ?? '/home/nmcdc';
-      const env = {
-        ...process.env,
-        PATH: `${home}/.local/bin:${home}/.bun/bin:${process.env.PATH ?? ''}`,
-      };
-
-      // Check if qmd is available. qmd does not reliably support --version.
-      await execAsync('qmd status', { timeout: 10_000, env });
+      // Check if qmd is available
+      await execAsync('qmd --version');
       // Run embedding update for all collections
-      const { stderr } = await execAsync('qmd embed', { timeout: 300_000, env });
+      const { stderr } = await execAsync('qmd embed', { timeout: 300_000 });
       if (stderr && !stderr.includes('warning')) {
         logger.warn(`QMD embed warning: ${stderr}`);
       }
