@@ -1296,7 +1296,19 @@ To call a tool, output a <tool_call> block:
 {"name": "tool_name", "arguments": {"key": "value"}}
 </tool_call>
 
-You may use multiple <tool_call> blocks per response. Wait for results; never fabricate outputs.
+IMPORTANT: Each tool call MUST be a separate <tool_call> block with exactly one tool name.
+Do NOT combine tool names (e.g. "tool_a + tool_b" is WRONG).
+To call multiple tools, use multiple blocks:
+
+<tool_call>
+{"name": "get_wallet_info", "arguments": {}}
+</tool_call>
+
+<tool_call>
+{"name": "get_portfolio", "arguments": {}}
+</tool_call>
+
+Wait for results; never fabricate outputs.
 
 ${toolDefs}`;
 }
@@ -1312,13 +1324,21 @@ function parseTextToolCalls(text: string): TextToolCall[] {
       const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
       const parsed = JSON.parse(cleaned);
       if (typeof parsed.name === 'string') {
-        calls.push({
-          name: parsed.name,
-          arguments:
-            typeof parsed.arguments === 'object' && parsed.arguments !== null
-              ? parsed.arguments
-              : {},
-        });
+        // Detect and split "tool_a + tool_b + ..." concatenated names
+        if (parsed.name.includes('+')) {
+          const names = parsed.name.split(/\s*\+\s*/).map((n: string) => n.trim()).filter(Boolean);
+          for (const name of names) {
+            calls.push({ name, arguments: typeof parsed.arguments === 'object' && parsed.arguments !== null ? parsed.arguments : {} });
+          }
+        } else {
+          calls.push({
+            name: parsed.name,
+            arguments:
+              typeof parsed.arguments === 'object' && parsed.arguments !== null
+                ? parsed.arguments
+                : {},
+          });
+        }
       }
     } catch {
       // Skip malformed tool calls
