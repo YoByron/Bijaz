@@ -1040,6 +1040,64 @@ function hasPlaceholderInputs(input: Record<string, unknown>): boolean {
   return false;
 }
 
+function normalizePerpPlaceOrderInput(input: Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...input };
+
+  if (typeof normalized.side === 'string') {
+    normalized.side = normalized.side.toLowerCase().trim();
+  }
+  if (typeof normalized.order_type === 'string') {
+    normalized.order_type = normalized.order_type.toLowerCase().trim();
+  }
+
+  // Coerce numeric fields that often arrive as strings from planner/revision LLM output.
+  if (typeof normalized.size === 'string') {
+    const parsed = Number(normalized.size);
+    if (!Number.isNaN(parsed)) {
+      normalized.size = parsed;
+    }
+  }
+  if (typeof normalized.price === 'string') {
+    const parsed = Number(normalized.price);
+    if (!Number.isNaN(parsed)) {
+      normalized.price = parsed;
+    }
+  }
+  if (typeof normalized.leverage === 'string') {
+    const parsed = Number(normalized.leverage);
+    if (!Number.isNaN(parsed)) {
+      normalized.leverage = parsed;
+    }
+  }
+
+  // Ensure a positive minimal size so schema validation doesn't fail before execution.
+  const numericSize =
+    typeof normalized.size === 'number'
+      ? normalized.size
+      : typeof normalized.size === 'string'
+        ? Number(normalized.size)
+        : NaN;
+  if (!Number.isFinite(numericSize) || numericSize <= 0) {
+    normalized.size = 0.001;
+  }
+
+  if (
+    normalized.order_type === 'limit' &&
+    (normalized.price === undefined ||
+      typeof normalized.price !== 'number' ||
+      !Number.isFinite(normalized.price))
+  ) {
+    normalized.order_type = 'market';
+    delete normalized.price;
+  }
+
+  if (normalized.side !== 'buy' && normalized.side !== 'sell') {
+    normalized.side = 'buy';
+  }
+
+  return normalized;
+}
+
 /**
  * Build context from completed plan steps for dynamic input resolution.
  */
@@ -1180,6 +1238,10 @@ async function executeToolStep(
     if (!sym) {
       (obj as any).symbol = defaultSymbol;
     }
+  }
+
+  if (toolName === 'perp_place_order') {
+    input = normalizePerpPlaceOrderInput(input as Record<string, unknown>);
   }
 
   // Check if tool requires confirmation
