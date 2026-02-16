@@ -1596,18 +1596,39 @@ async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
         ? ((perpPositions.summary as any).account_value as number)
         : null;
 
-    const availableBalance = hasHyperliquid
-      ? dexAbstraction === true
-        ? (spotUsdcFree ?? 0)
-        : perpWithdrawable != null
-          ? perpWithdrawable
-          : (balances.usdc ?? 0)
-      : (balances.usdc ?? 0);
-    const availableBalanceNote = hasHyperliquid
-      ? dexAbstraction === true
-        ? 'Hyperliquid DEX abstraction is enabled; available_balance reflects Hyperliquid spot USDC free (unified collateral).'
-        : 'Hyperliquid DEX abstraction is disabled; available_balance reflects Hyperliquid perp withdrawable USDC (free collateral).'
-      : 'available_balance reflects on-chain wallet/memory cash balance (not exchange collateral).';
+    // Determine available perp collateral for Hyperliquid.
+    // When dex abstraction is enabled (HIP-3), spot USDC free IS perp collateral.
+    // When dex abstraction is disabled/unknown, prefer perp withdrawable, but fall
+    // back to spot USDC free when perp withdrawable is zero — many accounts function
+    // as unified even when the legacy dexAbstraction flag returns false.  The exchange
+    // itself enforces collateral requirements, so reporting the best-available figure
+    // prevents the agent from refusing to trade when funds are clearly present.
+    let availableBalance: number;
+    let availableBalanceNote: string;
+    if (!hasHyperliquid) {
+      availableBalance = balances.usdc ?? 0;
+      availableBalanceNote =
+        'available_balance reflects on-chain wallet/memory cash balance (not exchange collateral).';
+    } else if (dexAbstraction === true) {
+      availableBalance = spotUsdcFree ?? 0;
+      availableBalanceNote =
+        'Hyperliquid DEX abstraction is enabled; available_balance reflects Hyperliquid spot USDC free (unified collateral).';
+    } else {
+      // dexAbstraction is false or null.  Use perp withdrawable when it has
+      // funds; otherwise fall back to spot USDC free (covers unified accounts
+      // whose dexAbstraction flag is not yet set).
+      const perpFunds = perpWithdrawable ?? 0;
+      const spotFunds = spotUsdcFree ?? 0;
+      if (perpFunds > 0) {
+        availableBalance = perpFunds;
+        availableBalanceNote =
+          'available_balance reflects Hyperliquid perp withdrawable USDC (free collateral). Spot USDC is also present but tracked separately.';
+      } else {
+        availableBalance = spotFunds;
+        availableBalanceNote =
+          'Perp withdrawable is 0; available_balance reflects Hyperliquid spot USDC free. On unified accounts spot USDC serves as perp collateral — place orders normally and the exchange will validate.';
+      }
+    }
 
     return {
       success: true,
@@ -1626,9 +1647,7 @@ async function getPortfolio(ctx: ToolExecutorContext): Promise<ToolResult> {
           hyperliquid_dex_abstraction_note:
             dexAbstraction === true
               ? 'DEX abstraction (HIP-3) enabled: spot and perp USDC are unified for collateral.'
-              : dexAbstraction === false
-                ? 'DEX abstraction (HIP-3) disabled: spot and perp USDC are separate; internal transfer may be needed.'
-                : 'DEX abstraction state unknown (null).',
+              : 'Use available_balance as your trading collateral. Place orders normally — the exchange validates collateral at order time.',
           hyperliquid_spot_usdc_free: spotUsdcFree,
           hyperliquid_spot_usdc_total: spotUsdcTotal,
           hyperliquid_perp_withdrawable_usdc: perpWithdrawable,

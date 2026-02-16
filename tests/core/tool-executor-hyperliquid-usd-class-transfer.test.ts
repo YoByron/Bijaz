@@ -89,7 +89,7 @@ describe('tool-executor hyperliquid_usd_class_transfer + portfolio semantics', (
     expect(mockState.usdClassTransferCalls[0]).toEqual({ amount: '2', toPerp: false });
   });
 
-  it('get_portfolio prefers Hyperliquid perp withdrawable as available_balance, and exposes spot/perp/onchain USDC separately', async () => {
+  it('get_portfolio prefers Hyperliquid perp withdrawable as available_balance when perp has funds', async () => {
     const { executeToolCall } = await import('../../src/core/tool-executor.js');
     const res = await executeToolCall(
       'get_portfolio',
@@ -103,6 +103,30 @@ describe('tool-executor hyperliquid_usd_class_transfer + portfolio semantics', (
     expect(data.summary.hyperliquid_dex_abstraction).toBe(false);
     expect(data.summary.hyperliquid_spot_usdc_free).toBeCloseTo(16.86, 6);
     expect(data.summary.hyperliquid_perp_withdrawable_usdc).toBeCloseTo(5, 6);
-    expect(data.summary.available_balance).toBeCloseTo(5, 6); // prefer perp withdrawable in HL mode
+    expect(data.summary.available_balance).toBeCloseTo(5, 6); // prefer perp withdrawable when it has funds
+  });
+
+  it('get_portfolio falls back to spot USDC free when dexAbstraction is false and perp withdrawable is 0', async () => {
+    // Simulate unified account where API reports dexAbstraction=false but funds are only in spot
+    mockState.clearinghouseState = {
+      assetPositions: [],
+      marginSummary: { accountValue: '0', totalNtlPos: '0', totalMarginUsed: '0' },
+      crossMarginSummary: { accountValue: '0', totalNtlPos: '0', totalMarginUsed: '0' },
+      withdrawable: '0',
+      crossMaintenanceMarginUsed: '0',
+    };
+    const { executeToolCall } = await import('../../src/core/tool-executor.js');
+    const res = await executeToolCall(
+      'get_portfolio',
+      {},
+      { config: { execution: { mode: 'paper' }, hyperliquid: { enabled: true } } as any } as any
+    );
+    expect(res.success).toBe(true);
+    const data = (res as any).data;
+    expect(data.summary.hyperliquid_dex_abstraction).toBe(false);
+    expect(data.summary.hyperliquid_perp_withdrawable_usdc).toBeCloseTo(0, 6);
+    expect(data.summary.hyperliquid_spot_usdc_free).toBeCloseTo(16.86, 6);
+    // Should fall back to spot USDC free instead of reporting 0
+    expect(data.summary.available_balance).toBeCloseTo(16.86, 6);
   });
 });
