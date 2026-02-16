@@ -2,6 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 
 const recordPerpTradeJournal = vi.fn();
 const recordPerpTrade = vi.fn(() => 1);
+const dbRun = vi.fn(() => ({}));
+const dbPrepare = vi.fn((sql: string) => {
+  if (sql.includes('COUNT(*)')) {
+    return { get: () => ({ c: 0 }) };
+  }
+  return { run: dbRun, all: () => [] };
+});
+const dbExec = vi.fn();
+let mockObservationOnlyUntilMs = Date.now() + 60_000;
 
 vi.mock('../../src/discovery/engine.js', () => ({
   runDiscovery: async () => ({
@@ -90,7 +99,7 @@ vi.mock('../../src/memory/autonomy_policy_state.js', () => ({
     minEdgeOverride: null,
     maxTradesPerScanOverride: null,
     leverageCapOverride: null,
-    observationOnlyUntilMs: Date.now() + 60_000,
+    observationOnlyUntilMs: mockObservationOnlyUntilMs,
     reason: 'test observation',
     updatedAt: new Date().toISOString(),
   }),
@@ -106,18 +115,14 @@ vi.mock('../../src/memory/trades.js', () => ({
 
 vi.mock('../../src/memory/db.js', () => ({
   openDatabase: () => ({
-    exec: () => undefined,
-    prepare: (sql: string) => {
-      if (sql.includes('COUNT(*)')) {
-        return { get: () => ({ c: 0 }) };
-      }
-      return { run: () => ({}), all: () => [] };
-    },
+    exec: dbExec,
+    prepare: dbPrepare,
   }),
 }));
 
 describe('AutonomousManager v1.3 observation mode', () => {
   it('suppresses live execution and journals would-trade entries when observation-only is active', async () => {
+    mockObservationOnlyUntilMs = Date.now() + 60_000;
     const { AutonomousManager } = await import('../../src/core/autonomous.js');
 
     const executor = {
@@ -152,5 +157,48 @@ describe('AutonomousManager v1.3 observation mode', () => {
     expect(executor.execute).not.toHaveBeenCalled();
     expect(recordPerpTradeJournal).toHaveBeenCalled();
     expect(recordPerpTrade).not.toHaveBeenCalled();
+  });
+
+  it('records autonomous_trades rows when autonomous execution runs', async () => {
+    mockObservationOnlyUntilMs = null;
+    dbRun.mockClear();
+    dbPrepare.mockClear();
+    recordPerpTrade.mockClear();
+
+    const { AutonomousManager } = await import('../../src/core/autonomous.js');
+
+    const executor = {
+      execute: vi.fn(async () => ({ executed: true, message: 'ok' })),
+      getOpenOrders: async () => [],
+      cancelOrder: async () => {},
+    } as any;
+    const marketClient = {
+      getMarket: async () => ({ symbol: 'BTC', markPrice: 70000, metadata: { maxLeverage: 10 } }),
+    } as any;
+    const limiter = {
+      getRemainingDaily: () => 100,
+      checkAndReserve: async () => ({ allowed: true }),
+      confirm: () => {},
+      release: () => {},
+    } as any;
+
+    const manager = new AutonomousManager(
+      {} as any,
+      marketClient,
+      executor,
+      limiter,
+      {
+        autonomy: { enabled: true, fullAuto: true, scanIntervalSeconds: 300, minEdge: 0.05, maxTradesPerScan: 3 },
+        hyperliquid: { maxLeverage: 5, minOrderNotionalUsd: 10 },
+      } as any
+    );
+
+    await manager.runScan();
+
+    expect(recordPerpTrade).toHaveBeenCalled();
+    expect(
+      dbPrepare.mock.calls.some((args) => String(args[0]).includes('INSERT INTO autonomous_trades'))
+    ).toBe(true);
+    expect(dbRun).toHaveBeenCalled();
   });
 });
