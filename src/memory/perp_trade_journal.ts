@@ -16,6 +16,16 @@ export type PerpTradeJournalEntry = {
   markPrice?: number | null;
   confidence?: string | null;
   reasoning?: string | null;
+  estimatedNotionalUsd?: number | null;
+  estimatedFeeRate?: number | null;
+  estimatedFeeType?: 'taker' | 'maker' | null;
+  estimatedFeeUsd?: number | null;
+  realizedFeeUsd?: number | null;
+  realizedFeeToken?: string | null;
+  realizedFillCount?: number | null;
+  realizedOrderId?: number | null;
+  realizedFillTimeMs?: number | null;
+  feeObservationError?: string | null;
   outcome: PerpTradeJournalOutcome;
   message?: string | null;
   error?: string | null;
@@ -68,4 +78,3 @@ export function listPerpTradeJournals(params?: {
   }
   return out;
 }
-

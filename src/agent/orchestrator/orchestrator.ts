@@ -420,8 +420,106 @@ Based on the tool results and analysis provided, generate a clear, actionable re
 5. **No permission-seeking**: Never ask the user for their risk tolerance, time horizon, or preferences. You are autonomous — you decide and act.
 6. **CRITICAL — You ARE connected to live tools**: You have full access to perp_place_order, get_portfolio, get_positions, perp_cancel_order, and all other trading tools. The orchestrator executes them on your behalf. NEVER say "I don't have live tools", "I can't execute", "tools aren't wired", or "I'm not connected". If a tool call failed, report the specific error. If no tool was called, that means the plan didn't include it — not that tools are unavailable.
 7. **Trade, don't talk about trading**: If the user wants you to trade, your response should report what you traded (or why a specific tool call failed), not describe what you "would" do hypothetically.
+8. **Ownership voice**: Speak as the autonomous operator of the managed trading book. Use first person ("I opened", "I reduced", "my position"). Avoid framing trade decisions as user-owned ("your position", "if you want").
+9. **Trade response contract**: In trade mode, always use this exact structure:
+Action: ...
+Book State: ...
+Risk: ...
+Next Action: ...
 
 Respond directly to the user's goal. Do not explain your reasoning process unless asked.`;
+
+function buildTradeBookState(state: AgentState): string {
+  const latestPortfolio = [...state.toolExecutions]
+    .reverse()
+    .find((t) => t.toolName === 'get_portfolio' && t.result.success);
+  if (latestPortfolio) {
+    const data = (latestPortfolio.result as { success: true; data: Record<string, unknown> }).data;
+    const available =
+      (data.available_balance as number | string | undefined) ??
+      (data.availableBalance as number | string | undefined) ??
+      (data.free_usdc as number | string | undefined);
+    if (available !== undefined) {
+      return `I am managing the book with available collateral ${String(available)} (latest portfolio snapshot).`;
+    }
+    return 'I am managing the book from the latest portfolio snapshot.';
+  }
+
+  const latestPositions = [...state.toolExecutions]
+    .reverse()
+    .find((t) => t.toolName === 'get_positions' && t.result.success);
+  if (latestPositions) {
+    return 'I am managing the book from the latest positions snapshot.';
+  }
+
+  return 'I am managing the book with no fresh portfolio snapshot in this cycle.';
+}
+
+function buildTradeActionSummary(state: AgentState): string {
+  const tradeAttempts = state.toolExecutions.filter((t) => t.toolName === 'perp_place_order');
+  if (tradeAttempts.length === 0) {
+    return 'I did not place a new perp order in this cycle.';
+  }
+
+  const successes = tradeAttempts.filter((t) => t.result.success);
+  if (successes.length > 0) {
+    return `I executed ${successes.length} perp order(s).`;
+  }
+
+  const lastError = (
+    tradeAttempts[tradeAttempts.length - 1]?.result as { success: false; error: string } | undefined
+  )?.error;
+  return `I did not execute a new perp order. Last perp_place_order failed${lastError ? `: ${lastError}` : '.'}`;
+}
+
+function buildTradeRiskSummary(state: AgentState): string {
+  const lastTrade = [...state.toolExecutions]
+    .reverse()
+    .find((t) => t.toolName === 'perp_place_order');
+  if (lastTrade?.result.success) {
+    return 'Execution risk is currently controlled, but book-level liquidation and volatility risk remain active.';
+  }
+  if (lastTrade && !lastTrade.result.success) {
+    const err = (lastTrade.result as { success: false; error: string }).error;
+    return `Primary risk is execution reliability until this blocker is resolved (${err}).`;
+  }
+  return 'Primary risk is position and collateral drift without fresh execution.';
+}
+
+function buildTradeNextActionSummary(state: AgentState): string {
+  const lastTrade = [...state.toolExecutions]
+    .reverse()
+    .find((t) => t.toolName === 'perp_place_order');
+  if (lastTrade?.result.success) {
+    return 'I will monitor positions and open orders, then rebalance or de-risk automatically on the next cycle.';
+  }
+  if (lastTrade && !lastTrade.result.success) {
+    return 'I will retry with validated inputs and current market/account state in the next autonomous cycle.';
+  }
+  return 'I will continue autonomous monitoring and execute the next valid trade action when constraints allow.';
+}
+
+function enforceTradeResponseContract(response: string, state: AgentState): string {
+  if (state.mode !== 'trade') {
+    return response;
+  }
+
+  const hasContractShape =
+    /\bAction:\s*/i.test(response) &&
+    /\bBook State:\s*/i.test(response) &&
+    /\bRisk:\s*/i.test(response) &&
+    /\bNext Action:\s*/i.test(response);
+  if (hasContractShape) {
+    return response;
+  }
+
+  return [
+    `Action: ${buildTradeActionSummary(state)}`,
+    `Book State: ${buildTradeBookState(state)}`,
+    `Risk: ${buildTradeRiskSummary(state)}`,
+    `Next Action: ${buildTradeNextActionSummary(state)}`,
+  ].join('\n');
+}
 
 /**
  * Run the orchestrator for a goal.
@@ -834,16 +932,17 @@ export async function runOrchestrator(
       if (!criticResult.approved && !criticResult.revisedResponse) {
         finalResponse = buildCriticFailureFallbackResponse(state, response);
       }
+      finalResponse = enforceTradeResponseContract(finalResponse, state);
       state = completeState(state, finalResponse, criticResult);
     } catch (error) {
       state = addWarning(
         state,
         `Critic failed: ${error instanceof Error ? error.message : 'Unknown'}`
       );
-      state = completeState(state, response);
+      state = completeState(state, enforceTradeResponseContract(response, state));
     }
   } else {
-    state = completeState(state, response);
+    state = completeState(state, enforceTradeResponseContract(response, state));
   }
 
   ctx.onUpdate?.(state);

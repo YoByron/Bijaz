@@ -69,6 +69,22 @@ export type ToolResult =
   | { success: true; data: unknown }
   | { success: false; error: string };
 
+type PerpOrderFeeEstimate = {
+  estimated_notional_usd: number | null;
+  estimated_fee_rate: number | null;
+  estimated_fee_type: 'taker' | 'maker';
+  estimated_fee_usd: number | null;
+};
+
+type PerpOrderRealizedFee = {
+  realized_fee_usd: number | null;
+  realized_fee_token: string | null;
+  realized_fill_count: number;
+  realized_order_id: number | null;
+  realized_fill_time_ms: number | null;
+  error?: string | null;
+};
+
 function getSystemToolPolicy(config: ThufirConfig): SystemToolPolicy {
   const settings = config.agent?.systemTools;
   const allowedCommands = Array.isArray(settings?.allowedCommands)
@@ -672,6 +688,12 @@ export async function executeToolCall(
           return { success: false, error: 'Missing or invalid order fields' };
         }
         const market = await ctx.marketClient.getMarket(symbol);
+        const feeEstimate = await estimatePerpOrderFee(ctx, {
+          orderType,
+          size,
+          inputPrice: price,
+          markPrice: market.markPrice ?? null,
+        });
         const riskCheck = await checkPerpRiskLimits({
           config: ctx.config,
           symbol,
@@ -700,6 +722,10 @@ export async function executeToolCall(
               markPrice: market.markPrice ?? null,
               confidence: null,
               reasoning: `Risk check blocked: ${riskCheck.reason ?? 'perp risk limits exceeded'}`,
+              estimatedNotionalUsd: feeEstimate.estimated_notional_usd,
+              estimatedFeeRate: feeEstimate.estimated_fee_rate,
+              estimatedFeeType: feeEstimate.estimated_fee_type,
+              estimatedFeeUsd: feeEstimate.estimated_fee_usd,
               outcome: 'blocked',
               error: riskCheck.reason ?? 'perp risk limits exceeded',
             });
@@ -727,6 +753,10 @@ export async function executeToolCall(
                 markPrice: market.markPrice ?? null,
                 confidence: null,
                 reasoning: `Spending limiter blocked: ${limitCheck.reason ?? 'limit exceeded'}`,
+                estimatedNotionalUsd: feeEstimate.estimated_notional_usd,
+                estimatedFeeRate: feeEstimate.estimated_fee_rate,
+                estimatedFeeType: feeEstimate.estimated_fee_type,
+                estimatedFeeUsd: feeEstimate.estimated_fee_usd,
                 outcome: 'blocked',
                 error: limitCheck.reason ?? 'limit exceeded',
               });
@@ -747,6 +777,7 @@ export async function executeToolCall(
           reduceOnly,
           confidence: 'medium' as const,
         };
+        const executionStartMs = Date.now();
         const result = await ctx.executor.execute(market, decision);
         if (!result.executed) {
           ctx.limiter.release(size);
@@ -774,6 +805,10 @@ export async function executeToolCall(
               markPrice: market.markPrice ?? null,
               confidence: 'medium',
               reasoning: null,
+              estimatedNotionalUsd: feeEstimate.estimated_notional_usd,
+              estimatedFeeRate: feeEstimate.estimated_fee_rate,
+              estimatedFeeType: feeEstimate.estimated_fee_type,
+              estimatedFeeUsd: feeEstimate.estimated_fee_usd,
               outcome: 'failed',
               error: result.message,
             });
@@ -783,6 +818,13 @@ export async function executeToolCall(
           return { success: false, error: result.message };
         }
         ctx.limiter.confirm(size);
+        const inferredOrderId = parseOrderIdFromResultMessage(result.message);
+        const realizedFee = await fetchRealizedPerpFee(ctx, {
+          symbol,
+          side: side as 'buy' | 'sell',
+          orderId: inferredOrderId,
+          startTimeMs: Math.max(0, executionStartMs - 10_000),
+        });
         try {
           const tradeId = recordPerpTrade({
             hypothesisId: null,
@@ -807,13 +849,32 @@ export async function executeToolCall(
             markPrice: market.markPrice ?? null,
             confidence: 'medium',
             reasoning: null,
+            estimatedNotionalUsd: feeEstimate.estimated_notional_usd,
+            estimatedFeeRate: feeEstimate.estimated_fee_rate,
+            estimatedFeeType: feeEstimate.estimated_fee_type,
+            estimatedFeeUsd: feeEstimate.estimated_fee_usd,
+            realizedFeeUsd: realizedFee.realized_fee_usd,
+            realizedFeeToken: realizedFee.realized_fee_token,
+            realizedFillCount: realizedFee.realized_fill_count,
+            realizedOrderId: realizedFee.realized_order_id,
+            realizedFillTimeMs: realizedFee.realized_fill_time_ms,
+            feeObservationError: realizedFee.error ?? null,
             outcome: 'executed',
             message: result.message,
           });
         } catch {
           // Best-effort journaling: never block trading due to local DB issues.
         }
-        return { success: true, data: result };
+        return {
+          success: true,
+          data: {
+            ...result,
+            fees: {
+              ...feeEstimate,
+              ...realizedFee,
+            },
+          },
+        };
       }
 
       case 'perp_open_orders': {
@@ -1790,6 +1851,158 @@ function computeMaxDrawdownPct(series: Array<[number, number]>): number | null {
     }
   }
   return Number.isFinite(maxDd) ? maxDd * 100 : null;
+}
+
+async function estimatePerpOrderFee(
+  ctx: ToolExecutorContext,
+  params: {
+    orderType: 'market' | 'limit';
+    size: number;
+    inputPrice?: number;
+    markPrice: number | null;
+  }
+): Promise<PerpOrderFeeEstimate> {
+  const estimatedNotional =
+    Number.isFinite(params.inputPrice) && (params.inputPrice as number) > 0
+      ? params.size * (params.inputPrice as number)
+      : Number.isFinite(params.markPrice) && (params.markPrice as number) > 0
+        ? params.size * (params.markPrice as number)
+        : null;
+  const feeType: 'taker' | 'maker' = params.orderType === 'market' ? 'taker' : 'maker';
+  const fallback: PerpOrderFeeEstimate = {
+    estimated_notional_usd: Number.isFinite(estimatedNotional) ? estimatedNotional : null,
+    estimated_fee_rate: null,
+    estimated_fee_type: feeType,
+    estimated_fee_usd: null,
+  };
+  if (ctx.config.execution?.provider !== 'hyperliquid') {
+    return fallback;
+  }
+  try {
+    const client = new HyperliquidClient(ctx.config);
+    if (!client.getAccountAddress()) return fallback;
+    const fees = (await client.getUserFees()) as {
+      userCrossRate?: string | number;
+      userAddRate?: string | number;
+    };
+    const rateRaw = feeType === 'taker' ? fees.userCrossRate : fees.userAddRate;
+    const rate = Number(rateRaw);
+    const estimatedFee =
+      Number.isFinite(rate) && Number.isFinite(estimatedNotional)
+        ? rate * (estimatedNotional as number)
+        : null;
+    return {
+      estimated_notional_usd: Number.isFinite(estimatedNotional) ? estimatedNotional : null,
+      estimated_fee_rate: Number.isFinite(rate) ? rate : null,
+      estimated_fee_type: feeType,
+      estimated_fee_usd: Number.isFinite(estimatedFee) ? estimatedFee : null,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function parseOrderIdFromResultMessage(message: string | undefined): number | null {
+  if (typeof message !== 'string') return null;
+  const match = message.match(/oid=(\d+)/i);
+  if (!match) return null;
+  const orderId = Number(match[1]);
+  return Number.isFinite(orderId) ? orderId : null;
+}
+
+async function fetchRealizedPerpFee(
+  ctx: ToolExecutorContext,
+  params: {
+    symbol: string;
+    side: 'buy' | 'sell';
+    startTimeMs: number;
+    orderId?: number | null;
+  }
+): Promise<PerpOrderRealizedFee> {
+  const fallback: PerpOrderRealizedFee = {
+    realized_fee_usd: null,
+    realized_fee_token: null,
+    realized_fill_count: 0,
+    realized_order_id: params.orderId ?? null,
+    realized_fill_time_ms: null,
+    error: null,
+  };
+  if (ctx.config.execution?.provider !== 'hyperliquid') {
+    return fallback;
+  }
+  try {
+    const client = new HyperliquidClient(ctx.config);
+    if (!client.getAccountAddress()) return fallback;
+    const fillsRaw = await client.getUserFillsByTime({
+      startTime: Math.max(0, params.startTimeMs),
+      endTime: Date.now(),
+      aggregateByTime: false,
+    });
+    const sideCode = params.side === 'buy' ? 'B' : 'A';
+    const fills = (Array.isArray(fillsRaw) ? fillsRaw : []).filter((fill) => {
+      if (!fill || typeof fill !== 'object') return false;
+      const coin = String((fill as { coin?: unknown }).coin ?? '').toUpperCase();
+      const side = String((fill as { side?: unknown }).side ?? '').toUpperCase();
+      return coin === params.symbol.toUpperCase() && side === sideCode;
+    }) as Array<Record<string, unknown>>;
+
+    if (fills.length === 0) return fallback;
+
+    const firstFill = fills[0]!;
+    let selected = fills;
+    if (params.orderId != null) {
+      const byOrder = fills.filter((fill) => Number(fill.oid) === params.orderId);
+      if (byOrder.length > 0) {
+        selected = byOrder;
+      }
+    } else {
+      const newest = fills.reduce((acc, fill) => {
+        const t = Number(fill.time ?? 0);
+        const accT = Number(acc?.time ?? 0);
+        return t > accT ? fill : acc;
+      }, firstFill);
+      const newestOrderId = Number(newest?.oid ?? NaN);
+      if (Number.isFinite(newestOrderId)) {
+        const byNewestOrder = fills.filter((fill) => Number(fill.oid) === newestOrderId);
+        if (byNewestOrder.length > 0) {
+          selected = byNewestOrder;
+        } else {
+          selected = [newest];
+        }
+      } else {
+        selected = [newest];
+      }
+    }
+
+    const totalFee = selected.reduce((sum, fill) => {
+      const fee = Number(fill.fee ?? NaN);
+      return Number.isFinite(fee) ? sum + fee : sum;
+    }, 0);
+    const newestFill = selected.reduce((acc, fill) => {
+      const t = Number(fill.time ?? 0);
+      const accT = Number(acc?.time ?? 0);
+      return t > accT ? fill : acc;
+    }, selected[0]!);
+    const tokenRaw = newestFill?.feeToken;
+    const token = typeof tokenRaw === 'string' ? tokenRaw : null;
+    const selectedOrderId = Number(newestFill?.oid ?? NaN);
+    const selectedFillTime = Number(newestFill?.time ?? NaN);
+    return {
+      realized_fee_usd: Number.isFinite(totalFee) ? totalFee : null,
+      realized_fee_token: token,
+      realized_fill_count: selected.length,
+      realized_order_id: Number.isFinite(selectedOrderId)
+        ? selectedOrderId
+        : (params.orderId ?? null),
+      realized_fill_time_ms: Number.isFinite(selectedFillTime) ? selectedFillTime : null,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...fallback,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
 }
 
 function computePnlForPeriod(series: Array<[number, number]>): number | null {
