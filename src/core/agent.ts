@@ -670,10 +670,17 @@ Just type naturally to chat about markets, risks, or positioning.
       if (!autoEnabled) {
         return 'Autonomous trading is disabled. Enable with /fullauto on and ensure autonomy.enabled: true.';
       }
-      return this.autonomousScan();
+      const scanResult = await this.autonomousScan();
+      // If the scanner found nothing actionable, fall through to the orchestrator
+      // so it can analyze the market with its tools and decide what to do.
+      if (scanResult.includes('No expressions met') || scanResult.includes('No discovery expressions')) {
+        this.logger.info('Autonomous scan found nothing above threshold; falling through to orchestrator');
+        return null;
+      }
+      return scanResult;
     }
 
-    // Option 1: Natural-language "place a trade" forces a one-shot scan + execution (best expression).
+    // Natural-language "place a trade" forces a one-shot scan + execution (best expression).
     if (wantsPlaceTradeNow) {
       if (!autonomyEnabled) {
         return 'Autonomous trading is disabled in config. Set `autonomy.enabled: true`.';
@@ -681,7 +688,13 @@ Just type naturally to chat about markets, risks, or positioning.
       if ((this.config.execution?.mode ?? 'paper') !== 'live') {
         return 'Live execution is not enabled. Set `execution.mode: live`.';
       }
-      return this.autonomous.runScan({ forceExecute: true, maxTrades: 1 });
+      const scanResult = await this.autonomous.runScan({ forceExecute: true, maxTrades: 1 });
+      // If nothing actionable even with forced execution, let the orchestrator handle it
+      if (scanResult.includes('No expressions met') || scanResult.includes('No discovery expressions')) {
+        this.logger.info('Forced scan found nothing; falling through to orchestrator');
+        return null;
+      }
+      return scanResult;
     }
 
     void sender;
