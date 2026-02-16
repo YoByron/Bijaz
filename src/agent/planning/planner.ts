@@ -37,6 +37,7 @@ Your job is to create execution plans that achieve the user's goal.
    - a concrete trade action step using \`perp_place_order\` or \`perp_cancel_order\`, or
    - a final non-tool step whose description starts with \`NO_TRADE_DECISION:\` and cites specific tool evidence.
    Keep pre-trade analysis to at most 3 tool steps before the terminal step.
+9. **Operator Ownership**: Plan as the operator of the managed trading book. Do not include steps that defer decisions to the user (e.g., "ask user", "if user wants", "wait for confirmation").
 
 ## Response Format
 
@@ -124,6 +125,7 @@ function buildPlanningPrompt(context: PlanningContext): string {
         '- Include a terminal trade step (`perp_place_order` or `perp_cancel_order`) unless evidence clearly supports no trade.',
         '- If no trade is justified, include final non-tool step starting with `NO_TRADE_DECISION:` and cite concrete tool evidence.',
         '- Use at most 3 pre-trade analysis tool steps before the terminal decision/action.',
+        '- Plan from operator ownership: this is the managed trading book, and decisions are agent-owned.',
       ].join('\n')
     );
   }

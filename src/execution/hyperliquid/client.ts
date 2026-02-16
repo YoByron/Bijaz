@@ -166,6 +166,25 @@ export class HyperliquidClient {
     return this.info.userFees({ user });
   }
 
+  async getUserFillsByTime(params: {
+    startTime: number;
+    endTime?: number;
+    aggregateByTime?: boolean;
+  }): Promise<unknown[]> {
+    const user = this.getAccountAddress();
+    if (!user) {
+      throw new Error(
+        'Hyperliquid account address not configured (hyperliquid.accountAddress or HYPERLIQUID_ACCOUNT_ADDRESS).'
+      );
+    }
+    return this.info.userFillsByTime({
+      user,
+      startTime: params.startTime,
+      endTime: params.endTime,
+      aggregateByTime: params.aggregateByTime,
+    });
+  }
+
   async getPortfolioMetrics(): Promise<PortfolioResponse> {
     const user = this.getAccountAddress();
     if (!user) {
