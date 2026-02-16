@@ -163,7 +163,9 @@ function parseplanResponse(
       goal,
       steps,
       complete: false,
-      blockers: parsed.blockers ?? [],
+      // Planner-generated blockers are hypothetical risks, not runtime failures.
+      // Only include them if the plan has zero tool steps (truly blocked).
+      blockers: steps.some((s) => s.requiresTool) ? [] : (parsed.blockers ?? []),
       confidence: parsed.confidence ?? 0.5,
       createdAt: now,
       updatedAt: now,

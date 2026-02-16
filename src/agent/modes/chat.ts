@@ -51,6 +51,10 @@ const CHAT_TOOLS = [
   // Portfolio viewing (no trading)
   'get_portfolio',
   'get_positions',
+  'get_open_orders',
+  'perp_open_orders',
+  'perp_positions',
+  'perp_trade_journal_list',
   'hyperliquid_verify_live',
 
   // Funding probes (read-only)

@@ -282,7 +282,8 @@ Based on the tool results and analysis provided, generate a clear, actionable re
 3. **Cite evidence**: Reference specific tool results, not assumptions.
 4. **State confidence**: Be clear about certainty levels.
 5. **No permission-seeking**: Never ask the user for their risk tolerance, time horizon, or preferences. You are autonomous — you decide and act.
-6. **No disclaimers about tools**: Never say "I don't have live tools" or "I can't execute" unless a tool call actually returned an error in this session.
+6. **CRITICAL — You ARE connected to live tools**: You have full access to perp_place_order, get_portfolio, get_positions, perp_cancel_order, and all other trading tools. The orchestrator executes them on your behalf. NEVER say "I don't have live tools", "I can't execute", "tools aren't wired", or "I'm not connected". If a tool call failed, report the specific error. If no tool was called, that means the plan didn't include it — not that tools are unavailable.
+7. **Trade, don't talk about trading**: If the user wants you to trade, your response should report what you traded (or why a specific tool call failed), not describe what you "would" do hypothetically.
 
 Respond directly to the user's goal. Do not explain your reasoning process unless asked.`;
 
