@@ -325,7 +325,11 @@ export class ConversationHandler {
             },
           };
 
-    const tradeToolNames = new Set(['perp_place_order']);
+    const tradeToolNames = new Set([
+      'perp_place_order',
+      'perp_cancel_order',
+      'hyperliquid_usd_class_transfer',
+    ]);
     const fundingToolNames = new Set([
       'cctp_bridge_usdc',
       'hyperliquid_deposit_usdc',
