@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS predictions (
 
     -- Metadata
     domain TEXT,
+    session_tag TEXT,
+    regime_tag TEXT,
+    strategy_class TEXT,
+    horizon_minutes INTEGER,
+    symbol TEXT,
     created_at TEXT DEFAULT (datetime('now')),
 
     -- Outcome (filled when market resolves)
@@ -40,6 +45,11 @@ CREATE TABLE IF NOT EXISTS predictions (
 
 CREATE INDEX IF NOT EXISTS idx_predictions_market ON predictions(market_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_domain ON predictions(domain);
+CREATE INDEX IF NOT EXISTS idx_predictions_session_tag ON predictions(session_tag);
+CREATE INDEX IF NOT EXISTS idx_predictions_regime_tag ON predictions(regime_tag);
+CREATE INDEX IF NOT EXISTS idx_predictions_strategy_class ON predictions(strategy_class);
+CREATE INDEX IF NOT EXISTS idx_predictions_horizon_minutes ON predictions(horizon_minutes);
+CREATE INDEX IF NOT EXISTS idx_predictions_symbol ON predictions(symbol);
 CREATE INDEX IF NOT EXISTS idx_predictions_created ON predictions(created_at);
 CREATE INDEX IF NOT EXISTS idx_predictions_outcome ON predictions(outcome);
 CREATE INDEX IF NOT EXISTS idx_predictions_unresolved ON predictions(outcome) WHERE outcome IS NULL;

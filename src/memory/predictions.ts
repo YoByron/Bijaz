@@ -18,6 +18,11 @@ export interface PredictionInput {
   keyFactors?: string[];
   intelIds?: string[];
   domain?: string;
+  sessionTag?: string;
+  regimeTag?: string;
+  strategyClass?: string;
+  horizonMinutes?: number;
+  symbol?: string;
   // Execution details (for auto-executed trades)
   executed?: boolean;
   executionPrice?: number;
@@ -37,6 +42,11 @@ export interface PredictionRecord {
   keyFactors?: string[];
   intelIds?: string[];
   domain?: string;
+  sessionTag?: string;
+  regimeTag?: string;
+  strategyClass?: string;
+  horizonMinutes?: number | null;
+  symbol?: string;
   createdAt: string;
   executed: boolean;
   executionPrice?: number | null;
@@ -113,6 +123,11 @@ export function createPrediction(input: PredictionInput): string {
       key_factors,
       intel_ids,
       domain,
+      session_tag,
+      regime_tag,
+      strategy_class,
+      horizon_minutes,
+      symbol,
       executed,
       execution_price,
       position_size
@@ -129,6 +144,11 @@ export function createPrediction(input: PredictionInput): string {
       @keyFactors,
       @intelIds,
       @domain,
+      @sessionTag,
+      @regimeTag,
+      @strategyClass,
+      @horizonMinutes,
+      @symbol,
       @executed,
       @executionPrice,
       @positionSize
@@ -148,6 +168,11 @@ export function createPrediction(input: PredictionInput): string {
     keyFactors: serializeJson(input.keyFactors),
     intelIds: serializeJson(input.intelIds),
     domain: input.domain ?? null,
+    sessionTag: input.sessionTag ?? null,
+    regimeTag: input.regimeTag ?? null,
+    strategyClass: input.strategyClass ?? null,
+    horizonMinutes: input.horizonMinutes ?? null,
+    symbol: input.symbol ?? null,
     executed: input.executed ? 1 : 0,
     executionPrice: input.executionPrice ?? null,
     positionSize: input.positionSize ?? null,
@@ -177,6 +202,11 @@ export function listPredictions(options?: {
       key_factors as keyFactors,
       intel_ids as intelIds,
       domain,
+      session_tag as sessionTag,
+      regime_tag as regimeTag,
+      strategy_class as strategyClass,
+      horizon_minutes as horizonMinutes,
+      symbol,
       created_at as createdAt,
       executed,
       execution_price as executionPrice,
@@ -211,6 +241,14 @@ export function listPredictions(options?: {
     keyFactors: parseJsonArray((row.keyFactors as string | null) ?? null),
     intelIds: parseJsonArray((row.intelIds as string | null) ?? null),
     domain: (row.domain as string) ?? undefined,
+    sessionTag: (row.sessionTag as string) ?? undefined,
+    regimeTag: (row.regimeTag as string) ?? undefined,
+    strategyClass: (row.strategyClass as string) ?? undefined,
+    horizonMinutes:
+      row.horizonMinutes === null || row.horizonMinutes === undefined
+        ? null
+        : Number(row.horizonMinutes),
+    symbol: (row.symbol as string) ?? undefined,
     createdAt: String(row.createdAt),
     executed: Boolean(row.executed),
     executionPrice: row.executionPrice as number | null,
@@ -238,6 +276,11 @@ export function getPrediction(id: string): PredictionRecord | null {
         key_factors as keyFactors,
         intel_ids as intelIds,
         domain,
+        session_tag as sessionTag,
+        regime_tag as regimeTag,
+        strategy_class as strategyClass,
+        horizon_minutes as horizonMinutes,
+        symbol,
         created_at as createdAt,
         executed,
         execution_price as executionPrice,
@@ -269,6 +312,14 @@ export function getPrediction(id: string): PredictionRecord | null {
     keyFactors: parseJsonArray((row.keyFactors as string | null) ?? null),
     intelIds: parseJsonArray((row.intelIds as string | null) ?? null),
     domain: (row.domain as string) ?? undefined,
+    sessionTag: (row.sessionTag as string) ?? undefined,
+    regimeTag: (row.regimeTag as string) ?? undefined,
+    strategyClass: (row.strategyClass as string) ?? undefined,
+    horizonMinutes:
+      row.horizonMinutes === null || row.horizonMinutes === undefined
+        ? null
+        : Number(row.horizonMinutes),
+    symbol: (row.symbol as string) ?? undefined,
     createdAt: String(row.createdAt),
     executed: Boolean(row.executed),
     executionPrice: row.executionPrice as number | null,
