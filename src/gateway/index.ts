@@ -33,6 +33,7 @@ import {
   suppressAlert,
 } from '../memory/alerts.js';
 import { enrichEscalationMessage } from './alert_enrichment.js';
+import { EventScanTriggerCoordinator } from '../core/event_scan_trigger.js';
 
 const config = loadConfig();
 try {
@@ -63,6 +64,32 @@ if (!defaultAgent) {
 const telegram = config.channels.telegram.enabled ? new TelegramAdapter(config) : null;
 const whatsapp = config.channels.whatsapp.enabled ? new WhatsAppAdapter(config) : null;
 const escalationPolicy = new EscalationPolicyEngine(config.notifications?.escalation);
+const eventScanTrigger = new EventScanTriggerCoordinator({
+  enabled: config.autonomy?.eventDriven ?? false,
+  cooldownMs: Math.max(0, Number(config.autonomy?.eventDrivenCooldownSeconds ?? 120)) * 1000,
+});
+
+async function maybeRunEventDrivenScan(source: 'intel' | 'proactive', itemCount: number): Promise<void> {
+  const minItems = Math.max(1, Number(config.autonomy?.eventDrivenMinItems ?? 1));
+  const decision = eventScanTrigger.tryAcquire({
+    eventKey: source,
+    itemCount,
+    minItems,
+  });
+  if (!decision.allowed) {
+    logger.info(
+      `Event-driven scan skipped (${source}): ${decision.reason}${
+        decision.waitMs != null ? ` waitMs=${decision.waitMs}` : ''
+      }`
+    );
+    return;
+  }
+  const startedAt = Date.now();
+  const scanResult = await defaultAgent!.getAutonomous().runScan();
+  logger.info(
+    `Event-driven scan executed (${source}) in ${Date.now() - startedAt}ms: ${scanResult}`
+  );
+}
 
 for (const instance of agentRegistry.agents.values()) {
   instance.start();
@@ -88,6 +115,16 @@ function stripIdentityIntro(text: string): string {
     .replace(/^\s*(I['’]m|I am)\s+Thufir\s+Hawat\.\s*/i, '');
 }
 
+let lastInteractiveMessageAtMs = 0;
+
+function isWithinActiveChatWindow(seconds: number | undefined): boolean {
+  const windowSeconds = Math.max(0, Number(seconds ?? 0));
+  if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) {
+    return false;
+  }
+  return Date.now() - lastInteractiveMessageAtMs < windowSeconds * 1000;
+}
+
 const onIncoming = async (
   message: {
     channel: 'telegram' | 'whatsapp' | 'cli';
@@ -97,6 +134,9 @@ const onIncoming = async (
     threadId?: string;
   }
 ) => {
+  if (message.senderId !== '__heartbeat__') {
+    lastInteractiveMessageAtMs = Date.now();
+  }
   let lastProgressMessage = '';
   let lastProgressAt = 0;
   const sendProgress = async (text: string): Promise<void> => {
@@ -216,13 +256,7 @@ if (intelFetchConfig?.enabled) {
         const result = await runIntelPipelineDetailed(config);
         logger.info(`Intel fetch stored ${result.storedCount} item(s).`);
 
-        if (config.autonomy?.eventDriven) {
-          const minItems = config.autonomy?.eventDrivenMinItems ?? 1;
-          if (result.storedCount >= minItems) {
-            const scanResult = await defaultAgent.getAutonomous().runScan();
-            logger.info(`Event-driven scan: ${scanResult}`);
-          }
-        }
+        await maybeRunEventDrivenScan('intel', result.storedCount);
 
         const alertsConfig = config.notifications?.intelAlerts;
         if (alertsConfig?.enabled && result.storedItems.length > 0) {
@@ -293,11 +327,14 @@ if (proactiveConfig?.enabled && proactiveConfig.mode !== 'heartbeat') {
     }
 
     try {
+      const suppressLlm =
+        proactiveConfig.suppressLlmDuringActiveChatSeconds != null &&
+        isWithinActiveChatWindow(proactiveConfig.suppressLlmDuringActiveChatSeconds);
       const result = await runProactiveSearch(config, {
         maxQueries: proactiveConfig.maxQueries,
         iterations: proactiveConfig.iterations,
         watchlistLimit: proactiveConfig.watchlistLimit,
-        useLlm: proactiveConfig.useLlm,
+        useLlm: suppressLlm ? false : proactiveConfig.useLlm,
         recentIntelLimit: proactiveConfig.recentIntelLimit,
         extraQueries: proactiveConfig.extraQueries,
         includeLearnedQueries: proactiveConfig.includeLearnedQueries,
@@ -307,6 +344,10 @@ if (proactiveConfig?.enabled && proactiveConfig.mode !== 'heartbeat') {
         fetchMaxChars: proactiveConfig.fetchMaxChars,
       });
       logger.info(`Proactive search stored ${result.storedCount} item(s).`);
+      if (suppressLlm) {
+        logger.info('Proactive LLM refinement suppressed due to active chat window');
+      }
+      await maybeRunEventDrivenScan('proactive', result.storedCount);
 
       const alertsConfig = config.notifications?.intelAlerts;
       if (alertsConfig?.enabled && result.storedItems.length > 0) {
@@ -374,14 +415,20 @@ if (heartbeatConfig?.enabled) {
   };
 
   const runHeartbeat = async () => {
+    const suppressHeartbeatLlm =
+      heartbeatConfig.suppressLlmDuringActiveChatSeconds != null &&
+      isWithinActiveChatWindow(heartbeatConfig.suppressLlmDuringActiveChatSeconds);
     let proactiveSummary = '';
     if (proactiveConfig?.enabled && proactiveConfig.mode === 'heartbeat') {
       try {
+        const suppressProactiveLlm =
+          proactiveConfig.suppressLlmDuringActiveChatSeconds != null &&
+          isWithinActiveChatWindow(proactiveConfig.suppressLlmDuringActiveChatSeconds);
         const result = await runProactiveSearch(config, {
           maxQueries: proactiveConfig.maxQueries,
           iterations: proactiveConfig.iterations,
           watchlistLimit: proactiveConfig.watchlistLimit,
-          useLlm: proactiveConfig.useLlm,
+          useLlm: suppressProactiveLlm ? false : proactiveConfig.useLlm,
           recentIntelLimit: proactiveConfig.recentIntelLimit,
           extraQueries: proactiveConfig.extraQueries,
           includeLearnedQueries: proactiveConfig.includeLearnedQueries,
@@ -405,6 +452,10 @@ if (heartbeatConfig?.enabled) {
         ]
           .filter(Boolean)
           .join('\n');
+        if (suppressProactiveLlm) {
+          logger.info('Heartbeat proactive LLM refinement suppressed due to active chat window');
+        }
+        await maybeRunEventDrivenScan('proactive', result.storedCount);
       } catch (error) {
         logger.error('Heartbeat proactive search failed', error);
       }
@@ -417,6 +468,10 @@ if (heartbeatConfig?.enabled) {
     const prompt = proactiveSummary
       ? `${heartbeatPrompt}\n\n${proactiveSummary}`
       : heartbeatPrompt;
+    if (suppressHeartbeatLlm) {
+      logger.info('Heartbeat LLM message generation suppressed due to active chat window');
+      return;
+    }
     const response = await defaultAgent.handleMessage(heartbeatUserId, prompt);
     if (!response || response.trim().length === 0) {
       return;
@@ -619,7 +674,7 @@ if (mentatConfig?.enabled) {
             `${scan.system} triggered with fragility ${(fragilityScore * 100).toFixed(1)}% ` +
             `and max delta ${(maxDelta * 100).toFixed(1)}%`,
           config: escalationConfig?.llmEnrichment,
-          onFallback: (error) => {
+          onFallback: (error: unknown) => {
             logger.warn('Alert LLM enrichment failed; sending mechanical fallback', {
               source: `mentat:${scheduleId}`,
               error: error instanceof Error ? error.message : String(error),
