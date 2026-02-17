@@ -24,6 +24,7 @@ import { createAgentRegistry } from './agent_router.js';
 import { createLlmClient } from '../core/llm.js';
 import { installConsoleFileMirror } from '../core/unified-logging.js';
 import { PositionHeartbeatService } from '../core/position_heartbeat.js';
+import { SchedulerControlPlane } from '../core/scheduler_control_plane.js';
 
 const config = loadConfig();
 try {
@@ -125,6 +126,14 @@ const onIncoming = async (
   }
 };
 
+const schedulerSeed = config.memory?.dbPath ?? config.agent?.workspace ?? 'default';
+const schedulerNamespace = Buffer.from(schedulerSeed).toString('base64url').slice(0, 16);
+const scheduler = new SchedulerControlPlane({
+  ownerId: `gateway:${process.pid}:${schedulerNamespace}`,
+  pollIntervalMs: 1_000,
+});
+let hasSchedulerJobs = false;
+
 const briefingConfig = config.notifications?.briefing;
 let lastBriefingDate = '';
 if (briefingConfig?.enabled) {
@@ -169,43 +178,37 @@ if (briefingConfig?.enabled) {
 }
 
 const intelFetchConfig = config.notifications?.intelFetch;
-let lastIntelFetchDate = '';
 if (intelFetchConfig?.enabled) {
-  setInterval(async () => {
-    const now = new Date();
-    const [hours, minutes] = intelFetchConfig.time.split(':').map((part) => Number(part));
-    if (Number.isNaN(hours) || Number.isNaN(minutes)) {
-      return;
-    }
-    const today = now.toISOString().split('T')[0]!;
-    if (lastIntelFetchDate === today) {
-      return;
-    }
-    if (now.getHours() !== hours || now.getMinutes() !== minutes) {
-      return;
-    }
+  scheduler.registerJob(
+    {
+      name: `gateway:${schedulerNamespace}:intel`,
+      schedule: { kind: 'daily', time: intelFetchConfig.time },
+      leaseMs: 120_000,
+    },
+    async () => {
+      try {
+        const result = await runIntelPipelineDetailed(config);
+        logger.info(`Intel fetch stored ${result.storedCount} item(s).`);
 
-    try {
-      const result = await runIntelPipelineDetailed(config);
-      logger.info(`Intel fetch stored ${result.storedCount} item(s).`);
-
-      if (config.autonomy?.eventDriven) {
-        const minItems = config.autonomy?.eventDrivenMinItems ?? 1;
-        if (result.storedCount >= minItems) {
-          const scanResult = await defaultAgent.getAutonomous().runScan();
-          logger.info(`Event-driven scan: ${scanResult}`);
+        if (config.autonomy?.eventDriven) {
+          const minItems = config.autonomy?.eventDrivenMinItems ?? 1;
+          if (result.storedCount >= minItems) {
+            const scanResult = await defaultAgent.getAutonomous().runScan();
+            logger.info(`Event-driven scan: ${scanResult}`);
+          }
         }
-      }
 
-      const alertsConfig = config.notifications?.intelAlerts;
-      if (alertsConfig?.enabled && result.storedItems.length > 0) {
-        await sendIntelAlerts(result.storedItems, alertsConfig);
+        const alertsConfig = config.notifications?.intelAlerts;
+        if (alertsConfig?.enabled && result.storedItems.length > 0) {
+          await sendIntelAlerts(result.storedItems, alertsConfig);
+        }
+      } catch (error) {
+        logger.error('Intel fetch failed', error);
+        throw error;
       }
-    } catch (error) {
-      logger.error('Intel fetch failed', error);
     }
-    lastIntelFetchDate = today;
-  }, 60_000);
+  );
+  hasSchedulerJobs = true;
 }
 
 const marketSyncConfig = config.notifications?.marketSync;
@@ -420,9 +423,26 @@ if (heartbeatConfig?.enabled) {
     }
   };
 
-  setInterval(() => {
-    runHeartbeat().catch((error) => logger.error('Heartbeat failed', error));
-  }, intervalMs);
+  scheduler.registerJob(
+    {
+      name: `gateway:${schedulerNamespace}:heartbeat`,
+      schedule: { kind: 'interval', intervalMs },
+      leaseMs: Math.max(30_000, intervalMs),
+    },
+    async () => {
+      try {
+        await runHeartbeat();
+      } catch (error) {
+        logger.error('Heartbeat failed', error);
+        throw error;
+      }
+    }
+  );
+  hasSchedulerJobs = true;
+}
+
+if (hasSchedulerJobs) {
+  scheduler.start();
 }
 
 const mentatConfig = config.notifications?.mentat;
