@@ -71,7 +71,12 @@ function scoreRows(rows: MarketRow[]): DiscoveryCandidate[] {
         spreadProxyBps: row.spreadProxyBps,
       };
     })
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      if (b.dayVolumeUsd !== a.dayVolumeUsd) return b.dayVolumeUsd - a.dayVolumeUsd;
+      if (b.openInterestUsd !== a.openInterestUsd) return b.openInterestUsd - a.openInterestUsd;
+      return a.symbol.localeCompare(b.symbol);
+    });
 }
 
 export async function selectDiscoveryMarkets(
@@ -82,13 +87,10 @@ export async function selectDiscoveryMarkets(
     minDayVolumeUsd?: number;
   }
 ): Promise<{ source: 'configured' | 'full_universe'; candidates: DiscoveryCandidate[] }> {
-  const configured = getConfiguredDiscoveryUniverse(config);
-  const fullUniverseWhenSymbolsEmpty =
-    config.autonomy?.discoverySelection?.fullUniverseWhenSymbolsEmpty ?? true;
-
-  if (configured.length > 0 || !fullUniverseWhenSymbolsEmpty) {
+  const configuredFallback = (() => {
+    const configured = getConfiguredDiscoveryUniverse(config);
     const base = configured.length > 0 ? configured : ['BTC', 'ETH'];
-    const candidates = base.map((symbol) => ({
+    return base.map((symbol) => ({
       symbol,
       score: 1,
       liquidityScore: 1,
@@ -99,7 +101,17 @@ export async function selectDiscoveryMarkets(
       fundingRate: 0,
       spreadProxyBps: 0,
     }));
-    return { source: 'configured', candidates: candidates.slice(0, options?.limit ?? candidates.length) };
+  })();
+
+  const configured = getConfiguredDiscoveryUniverse(config);
+  const fullUniverseWhenSymbolsEmpty =
+    config.autonomy?.discoverySelection?.fullUniverseWhenSymbolsEmpty ?? true;
+
+  if (configured.length > 0 || !fullUniverseWhenSymbolsEmpty) {
+    return {
+      source: 'configured',
+      candidates: configuredFallback.slice(0, options?.limit ?? configuredFallback.length),
+    };
   }
 
   const minOpenInterestUsd =
@@ -112,8 +124,20 @@ export async function selectDiscoveryMarkets(
     20_000_000;
   const limit = Math.max(1, options?.limit ?? config.autonomy?.discoverySelection?.preselectLimit ?? 24);
 
-  const client = new HyperliquidClient(config);
-  const [meta, assetCtxs] = await client.getMetaAndAssetCtxs();
+  const fallbackMinOpenInterestUsd = Math.max(50_000, minOpenInterestUsd * 0.1);
+  const fallbackMinDayVolumeUsd = Math.max(1_000_000, minDayVolumeUsd * 0.1);
+
+  let meta: { universe: Array<{ name: string }> };
+  let assetCtxs: unknown[];
+  try {
+    const client = new HyperliquidClient(config);
+    [meta, assetCtxs] = await client.getMetaAndAssetCtxs();
+  } catch {
+    return {
+      source: 'configured',
+      candidates: configuredFallback.slice(0, options?.limit ?? configuredFallback.length),
+    };
+  }
 
   const rows: MarketRow[] = [];
   for (let i = 0; i < meta.universe.length; i += 1) {
@@ -148,7 +172,6 @@ export async function selectDiscoveryMarkets(
 
   let ranked = scoreRows(rows);
   if (ranked.length === 0) {
-    // Fallback: keep some universe coverage even in sparse data conditions.
     const fallbackRows: MarketRow[] = [];
     for (let i = 0; i < meta.universe.length; i += 1) {
       const market = meta.universe[i];
@@ -168,7 +191,20 @@ export async function selectDiscoveryMarkets(
         spreadProxyBps: (Math.abs(markPx - oraclePx) / safePx) * 10_000,
       });
     }
-    ranked = scoreRows(fallbackRows);
+    ranked = scoreRows(
+      fallbackRows.filter(
+        (row) =>
+          row.openInterestUsd >= fallbackMinOpenInterestUsd &&
+          row.dayVolumeUsd >= fallbackMinDayVolumeUsd
+      )
+    );
+  }
+
+  if (ranked.length === 0) {
+    return {
+      source: 'configured',
+      candidates: configuredFallback.slice(0, options?.limit ?? configuredFallback.length),
+    };
   }
 
   return { source: 'full_universe', candidates: ranked.slice(0, limit) };
