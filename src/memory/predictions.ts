@@ -23,10 +23,14 @@ export interface PredictionInput {
   keyFactors?: string[];
   intelIds?: string[];
   domain?: string;
-  horizonMinutes?: number;
+  createdAt?: string;
   expiresAt?: string;
   contextTags?: string[];
-  createdAt?: string;
+  sessionTag?: string;
+  regimeTag?: string;
+  strategyClass?: string;
+  horizonMinutes?: number;
+  symbol?: string;
   // Execution details (for auto-executed trades)
   executed?: boolean;
   executionPrice?: number;
@@ -46,8 +50,12 @@ export interface PredictionRecord {
   keyFactors?: string[];
   intelIds?: string[];
   domain?: string;
-  createdAt: string;
+  sessionTag?: string;
+  regimeTag?: string;
+  strategyClass?: string;
   horizonMinutes?: number | null;
+  symbol?: string;
+  createdAt: string;
   expiresAt?: string | null;
   contextTags?: string[];
   resolutionStatus: PredictionResolutionStatus;
@@ -165,7 +173,11 @@ export function createPrediction(input: PredictionInput): string {
       intel_ids,
       domain,
       created_at,
+      session_tag,
+      regime_tag,
+      strategy_class,
       horizon_minutes,
+      symbol,
       expires_at,
       context_tags,
       resolution_status,
@@ -186,7 +198,11 @@ export function createPrediction(input: PredictionInput): string {
       @intelIds,
       @domain,
       @createdAt,
+      @sessionTag,
+      @regimeTag,
+      @strategyClass,
       @horizonMinutes,
+      @symbol,
       @expiresAt,
       @contextTags,
       @resolutionStatus,
@@ -210,7 +226,11 @@ export function createPrediction(input: PredictionInput): string {
     intelIds: serializeJson(input.intelIds),
     domain: input.domain ?? null,
     createdAt,
+    sessionTag: input.sessionTag ?? null,
+    regimeTag: input.regimeTag ?? null,
+    strategyClass: input.strategyClass ?? null,
     horizonMinutes,
+    symbol: input.symbol ?? null,
     expiresAt,
     contextTags: serializeJson(input.contextTags),
     resolutionStatus: 'open',
@@ -243,8 +263,12 @@ export function listPredictions(options?: {
       key_factors as keyFactors,
       intel_ids as intelIds,
       domain,
-      created_at as createdAt,
+      session_tag as sessionTag,
+      regime_tag as regimeTag,
+      strategy_class as strategyClass,
       horizon_minutes as horizonMinutes,
+      symbol,
+      created_at as createdAt,
       expires_at as expiresAt,
       context_tags as contextTags,
       resolution_status as resolutionStatus,
@@ -284,11 +308,15 @@ export function listPredictions(options?: {
     keyFactors: parseJsonArray((row.keyFactors as string | null) ?? null),
     intelIds: parseJsonArray((row.intelIds as string | null) ?? null),
     domain: (row.domain as string) ?? undefined,
-    createdAt: String(row.createdAt),
+    sessionTag: (row.sessionTag as string) ?? undefined,
+    regimeTag: (row.regimeTag as string) ?? undefined,
+    strategyClass: (row.strategyClass as string) ?? undefined,
     horizonMinutes:
       row.horizonMinutes === null || row.horizonMinutes === undefined
         ? null
         : Number(row.horizonMinutes),
+    symbol: (row.symbol as string) ?? undefined,
+    createdAt: String(row.createdAt),
     expiresAt: (row.expiresAt as string | null) ?? null,
     contextTags: parseJsonArray((row.contextTags as string | null) ?? null),
     resolutionStatus:
@@ -322,8 +350,12 @@ export function getPrediction(id: string): PredictionRecord | null {
         key_factors as keyFactors,
         intel_ids as intelIds,
         domain,
-        created_at as createdAt,
+        session_tag as sessionTag,
+        regime_tag as regimeTag,
+        strategy_class as strategyClass,
         horizon_minutes as horizonMinutes,
+        symbol,
+        created_at as createdAt,
         expires_at as expiresAt,
         context_tags as contextTags,
         resolution_status as resolutionStatus,
@@ -360,11 +392,15 @@ export function getPrediction(id: string): PredictionRecord | null {
     keyFactors: parseJsonArray((row.keyFactors as string | null) ?? null),
     intelIds: parseJsonArray((row.intelIds as string | null) ?? null),
     domain: (row.domain as string) ?? undefined,
-    createdAt: String(row.createdAt),
+    sessionTag: (row.sessionTag as string) ?? undefined,
+    regimeTag: (row.regimeTag as string) ?? undefined,
+    strategyClass: (row.strategyClass as string) ?? undefined,
     horizonMinutes:
       row.horizonMinutes === null || row.horizonMinutes === undefined
         ? null
         : Number(row.horizonMinutes),
+    symbol: (row.symbol as string) ?? undefined,
+    createdAt: String(row.createdAt),
     expiresAt: (row.expiresAt as string | null) ?? null,
     contextTags: parseJsonArray((row.contextTags as string | null) ?? null),
     resolutionStatus:
