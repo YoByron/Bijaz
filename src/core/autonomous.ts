@@ -41,6 +41,44 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+type SessionBucket = 'asia' | 'europe_open' | 'us_open' | 'us_midday' | 'us_close' | 'weekend';
+
+interface SessionWeightContext {
+  session: SessionBucket;
+  sessionWeight: number;
+}
+
+const SESSION_WEIGHTS: Record<SessionBucket, number> = {
+  asia: 0.9,
+  europe_open: 1.0,
+  us_open: 1.15,
+  us_midday: 0.95,
+  us_close: 1.05,
+  weekend: 0.65,
+};
+
+function resolveSessionWeightContext(now: Date): SessionWeightContext {
+  const day = now.getUTCDay();
+  if (day === 0 || day === 6) {
+    return { session: 'weekend', sessionWeight: SESSION_WEIGHTS.weekend };
+  }
+
+  const hour = now.getUTCHours();
+  if (hour >= 23 || hour < 7) {
+    return { session: 'asia', sessionWeight: SESSION_WEIGHTS.asia };
+  }
+  if (hour < 13) {
+    return { session: 'europe_open', sessionWeight: SESSION_WEIGHTS.europe_open };
+  }
+  if (hour < 17) {
+    return { session: 'us_open', sessionWeight: SESSION_WEIGHTS.us_open };
+  }
+  if (hour < 20) {
+    return { session: 'us_midday', sessionWeight: SESSION_WEIGHTS.us_midday };
+  }
+  return { session: 'us_close', sessionWeight: SESSION_WEIGHTS.us_close };
+}
+
 export interface AutonomousConfig {
   enabled: boolean;
   fullAuto: boolean;
@@ -352,7 +390,9 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       if (expr.expectedEdge < adaptiveMinEdge) {
         return false;
       }
-      if (this.config.requireHighConfidence && expr.confidence < 0.7) {
+      const { sessionWeight } = resolveSessionWeightContext(new Date());
+      const weightedConfidence = clamp01(expr.confidence * sessionWeight);
+      if (this.config.requireHighConfidence && weightedConfidence < 0.7) {
         return false;
       }
       return true;
@@ -374,6 +414,10 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
 
     for (const expr of toExecute) {
       const symbol = expr.symbol.includes('/') ? expr.symbol.split('/')[0]! : expr.symbol;
+      const sessionContext = resolveSessionWeightContext(new Date());
+      const confidenceRaw = clamp01(expr.confidence ?? 0);
+      const confidenceWeighted = clamp01(confidenceRaw * sessionContext.sessionWeight);
+      const sizingModifier = sessionContext.sessionWeight;
       const market = await this.marketClient.getMarket(symbol);
       const cluster = clusterBySymbol.get(expr.symbol);
       const regime = cluster ? classifyMarketRegime(cluster) : 'choppy';
@@ -409,13 +453,23 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
         sampleCount: perf.sampleCount,
         maxFraction: Number((this.thufirConfig.autonomy as any)?.newsEntry?.maxKellyFraction ?? 0.25),
       });
-      const signalAdjustedUsd = desiredUsd * Math.max(0.25, kellyFraction * 4);
+      const signalAdjustedUsd = desiredUsd * Math.max(0.25, kellyFraction * 4) * sizingModifier;
       const newsSizeCapFraction = Number((this.thufirConfig.autonomy as any)?.newsEntry?.sizeCapFraction ?? 0.5);
       const cappedForNews =
         expr.newsTrigger?.enabled === true
           ? Math.min(signalAdjustedUsd, remainingDaily * clamp01(newsSizeCapFraction))
           : signalAdjustedUsd;
       const probeUsd = Math.min(Math.max(minOrderUsd, cappedForNews), remainingDaily);
+      this.logger.info('Session weighting applied to autonomous decision inputs', {
+        symbol,
+        session: sessionContext.session,
+        sessionWeight: Number(sessionContext.sessionWeight.toFixed(4)),
+        confidenceBefore: Number(confidenceRaw.toFixed(4)),
+        confidenceAfter: Number(confidenceWeighted.toFixed(4)),
+        sizingModifier: Number(sizingModifier.toFixed(4)),
+        sizeUsdBefore: Number(desiredUsd.toFixed(4)),
+        sizeUsdAfter: Number(signalAdjustedUsd.toFixed(4)),
+      });
       if (probeUsd <= 0) {
         outputs.push(`${symbol}: Skipped (insufficient daily budget)`);
         continue;
@@ -460,8 +514,12 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
         orderType: expr.orderType,
         leverage: targetLeverage,
         reasoning: `${expr.expectedMove} | edge=${(expr.expectedEdge * 100).toFixed(2)}% confidence=${(
-          expr.confidence * 100
-        ).toFixed(1)}% regime=${regime} signal=${signalClass} kelly=${(kellyFraction * 100).toFixed(1)}%`,
+          confidenceWeighted * 100
+        ).toFixed(1)}% regime=${regime} signal=${signalClass} kelly=${(kellyFraction * 100).toFixed(1)}% session=${
+          sessionContext.session
+        } sessionWeight=${sessionContext.sessionWeight.toFixed(2)} confidenceRaw=${confidenceRaw.toFixed(
+          3
+        )} confidenceWeighted=${confidenceWeighted.toFixed(3)} sizingModifier=${sizingModifier.toFixed(2)}`,
       };
 
       const tradeResult = await this.executor.execute(market, decision);
@@ -532,7 +590,7 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
           orderType: expr.orderType ?? null,
           reduceOnly: false,
           markPrice: markPrice || null,
-          confidence: expr.confidence != null ? String(expr.confidence) : null,
+          confidence: String(confidenceWeighted),
           reasoning: decision.reasoning ?? null,
           signalClass,
           marketRegime: regime,
