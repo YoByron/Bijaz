@@ -35,6 +35,7 @@ import {
 } from './autonomy_policy.js';
 import { getAutonomyPolicyState } from '../memory/autonomy_policy_state.js';
 import { summarizeSignalPerformance } from './signal_performance.js';
+import { SchedulerControlPlane } from './scheduler_control_plane.js';
 
 function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
@@ -75,12 +76,12 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
   private limiter: DbSpendingLimitEnforcer;
   private logger: Logger;
   private thufirConfig: ThufirConfig;
+  private readonly schedulerNamespace: string;
 
   private isPaused = false;
   private pauseReason = '';
   private consecutiveLosses = 0;
-  private scanTimer: NodeJS.Timeout | null = null;
-  private reportTimer: NodeJS.Timeout | null = null;
+  private scheduler: SchedulerControlPlane | null = null;
 
   constructor(
     _llm: LlmClient,
@@ -96,6 +97,7 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
     this.limiter = limiter;
     this.thufirConfig = thufirConfig;
     this.logger = logger ?? new Logger('info');
+    this.schedulerNamespace = this.buildSchedulerNamespace();
 
     // Load autonomous config with defaults
     this.config = {
@@ -120,21 +122,47 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       this.logger.info('Autonomous mode is disabled in config');
       return;
     }
+    if (this.scheduler) {
+      return;
+    }
 
     const scanInterval = this.thufirConfig.autonomy?.scanIntervalSeconds ?? 900;
+    const scheduler = new SchedulerControlPlane({
+      ownerId: `autonomous:${process.pid}`,
+      pollIntervalMs: 1_000,
+      defaultLeaseMs: Math.max(30_000, scanInterval * 2_000),
+    });
 
-    // Start periodic scanning
-    this.scanTimer = setInterval(async () => {
-      try {
-        await this.runScan();
-      } catch (error) {
-        this.logger.error('Autonomous scan failed', error);
-        this.emit('error', error instanceof Error ? error : new Error(String(error)));
+    scheduler.registerJob(
+      {
+        name: `${this.schedulerNamespace}:scan`,
+        schedule: { kind: 'interval', intervalMs: scanInterval * 1_000 },
+        leaseMs: Math.max(30_000, scanInterval * 2_000),
+      },
+      async () => {
+        try {
+          await this.runScan();
+        } catch (error) {
+          this.logger.error('Autonomous scan failed', error);
+          this.emit('error', error instanceof Error ? error : new Error(String(error)));
+          throw error;
+        }
       }
-    }, scanInterval * 1000);
+    );
 
-    // Schedule daily report
-    this.scheduleDailyReport();
+    scheduler.registerJob(
+      {
+        name: `${this.schedulerNamespace}:report`,
+        schedule: { kind: 'daily', time: this.config.dailyReportTime },
+        leaseMs: 60_000,
+      },
+      async () => {
+        await this.runDailyReportTick();
+      }
+    );
+
+    scheduler.start();
+    this.scheduler = scheduler;
 
     this.logger.info(`Autonomous mode started. Full auto: ${this.config.fullAuto}. Scan interval: ${scanInterval}s`);
   }
@@ -143,14 +171,8 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
    * Stop autonomous mode
    */
   stop(): void {
-    if (this.scanTimer) {
-      clearInterval(this.scanTimer);
-      this.scanTimer = null;
-    }
-    if (this.reportTimer) {
-      clearTimeout(this.reportTimer);
-      this.reportTimer = null;
-    }
+    this.scheduler?.stop();
+    this.scheduler = null;
     this.logger.info('Autonomous mode stopped');
   }
 
@@ -653,37 +675,14 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
     return lines.join('\n');
   }
 
-  /**
-   * Schedule the daily report
-   */
-  private scheduleDailyReport(): void {
-    const scheduleNext = () => {
-      const now = new Date();
-      const timeParts = this.config.dailyReportTime.split(':').map(Number);
-      const hours = timeParts[0] ?? 20;
-      const minutes = timeParts[1] ?? 0;
-
-      const target = new Date(now);
-      target.setHours(hours, minutes, 0, 0);
-
-      if (target <= now) {
-        target.setDate(target.getDate() + 1);
-      }
-
-      const delay = target.getTime() - now.getTime();
-
-      this.reportTimer = setTimeout(async () => {
-        try {
-          const report = await this.generateDailyPnLReport();
-          this.emit('daily-report', report);
-        } catch (error) {
-          this.logger.error('Failed to generate daily report', error);
-        }
-        scheduleNext();
-      }, delay);
-    };
-
-    scheduleNext();
+  async runDailyReportTick(): Promise<void> {
+    try {
+      const report = await this.generateDailyPnLReport();
+      this.emit('daily-report', report);
+    } catch (error) {
+      this.logger.error('Failed to generate daily report', error);
+      throw error;
+    }
   }
 
   private calculateUnrealizedPnl(): number {
@@ -743,5 +742,15 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
       CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON autonomous_trades(timestamp);
       CREATE INDEX IF NOT EXISTS idx_trades_outcome ON autonomous_trades(outcome);
     `);
+  }
+
+  private buildSchedulerNamespace(): string {
+    const seed =
+      this.thufirConfig.memory?.sessionsPath ??
+      this.thufirConfig.memory?.dbPath ??
+      this.thufirConfig.agent?.workspace ??
+      'default';
+    const hash = Buffer.from(seed).toString('base64url').slice(0, 16);
+    return `autonomy:${hash}`;
   }
 }

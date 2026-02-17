@@ -543,6 +543,30 @@ CREATE TABLE IF NOT EXISTS agent_playbooks (
 CREATE INDEX IF NOT EXISTS idx_agent_playbooks_updated ON agent_playbooks(updated_at);
 
 -- ============================================================================
+-- Scheduler Control Plane
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS scheduler_jobs (
+    name TEXT PRIMARY KEY,
+    schedule_kind TEXT NOT NULL CHECK(schedule_kind IN ('interval', 'daily')),
+    interval_ms INTEGER,
+    daily_time TEXT,
+    status TEXT NOT NULL DEFAULT 'idle' CHECK(status IN ('idle', 'running', 'success', 'failed')),
+    last_run_at TEXT,
+    next_run_at TEXT NOT NULL,
+    failures INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    lock_owner TEXT,
+    lock_expires_at TEXT,
+    lease_ms INTEGER NOT NULL DEFAULT 120000,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_next_run ON scheduler_jobs(next_run_at);
+CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_lock_expires ON scheduler_jobs(lock_expires_at);
+
+-- ============================================================================
 -- Views
 -- ============================================================================
 

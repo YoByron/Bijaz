@@ -37,7 +37,6 @@ export class ThufirAgent {
   private executor: ExecutionAdapter;
   private limiter: DbSpendingLimitEnforcer;
   private logger: Logger;
-  private scanTimer: NodeJS.Timeout | null = null;
   private conversation: ConversationHandler;
   private autonomous: AutonomousManager;
   private toolContext: ToolExecutorContext;
@@ -116,7 +115,7 @@ export class ThufirAgent {
   }
 
   start(): void {
-    // Start autonomous manager (handles its own scheduling)
+    // Start autonomous manager (handles persisted scheduler control-plane jobs).
     this.autonomous.start();
     this.tradeManagement?.start();
 
@@ -125,26 +124,11 @@ export class ThufirAgent {
       this.logger.info('Daily report generated');
       // Reports will be pushed to channels by the gateway
     });
-
-    // Legacy scan loop (for backwards compatibility when fullAuto is off)
-    if (this.config.autonomy.enabled && !(this.config.autonomy as any).fullAuto) {
-      const interval = this.config.autonomy.scanIntervalSeconds * 1000;
-      this.scanTimer = setInterval(() => {
-        this.autonomousScan().catch((err) =>
-          this.logger.error('Autonomous scan failed', err)
-        );
-      }, interval);
-      this.logger.info(`Legacy scan enabled: scanning every ${interval / 1000}s`);
-    }
   }
 
   stop(): void {
     this.autonomous.stop();
     this.tradeManagement?.stop();
-    if (this.scanTimer) {
-      clearInterval(this.scanTimer);
-      this.scanTimer = null;
-    }
   }
 
   /**
