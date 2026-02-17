@@ -9,7 +9,7 @@ import {
   signalReflexivityFragility,
 } from './signals.js';
 import { generateHypotheses } from './hypotheses.js';
-import { mapExpressionPlan } from './expressions.js';
+import { enrichExpressionContextPack, mapExpressionPlan, type ContextPackProviders } from './expressions.js';
 
 function clusterSignals(symbol: string, signals: Array<SignalPrimitive | null>): SignalCluster {
   const flat = signals.filter((s): s is NonNullable<typeof s> => !!s);
@@ -27,7 +27,10 @@ function clusterSignals(symbol: string, signals: Array<SignalPrimitive | null>):
   };
 }
 
-export async function runDiscovery(config: ThufirConfig): Promise<{
+export async function runDiscovery(
+  config: ThufirConfig,
+  options?: { contextPackProviders?: ContextPackProviders }
+): Promise<{
   clusters: SignalCluster[];
   hypotheses: ReturnType<typeof generateHypotheses>;
   expressions: ReturnType<typeof mapExpressionPlan>[];
@@ -72,18 +75,24 @@ export async function runDiscovery(config: ThufirConfig): Promise<{
     return items;
   });
 
-  const expressions = hypotheses.map((hyp) => {
+  const expressions = await Promise.all(hypotheses.map(async (hyp) => {
     const cluster = clusters.find((c) => c.id === hyp.clusterId)!;
     const expr = mapExpressionPlan(config, cluster, hyp);
+    const enriched = await enrichExpressionContextPack({
+      expression: expr,
+      cluster,
+      hypothesis: hyp,
+      providers: options?.contextPackProviders,
+    });
     storeDecisionArtifact({
       source: 'discovery',
       kind: 'expression',
       marketId: cluster.symbol,
-      fingerprint: expr.id,
-      payload: expr,
+      fingerprint: enriched.id,
+      payload: enriched,
     });
-    return expr;
-  });
+    return enriched;
+  }));
 
   for (const cluster of clusters) {
     storeDecisionArtifact({

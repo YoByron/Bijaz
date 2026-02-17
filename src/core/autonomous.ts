@@ -40,6 +40,19 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+function formatContextPackTrace(input: {
+  marketRegime: string;
+  volatilityBucket: string;
+  liquidityBucket: string;
+  executionStatus: string;
+  eventKind: string;
+  portfolioPosture: string;
+  missing: string[];
+}): string {
+  const missing = input.missing.length > 0 ? input.missing.join(',') : 'none';
+  return `context_pack{regime=${input.marketRegime};vol=${input.volatilityBucket};liq=${input.liquidityBucket};exec=${input.executionStatus};event=${input.eventKind};portfolio=${input.portfolioPosture};missing=${missing}}`;
+}
+
 export interface AutonomousConfig {
   enabled: boolean;
   fullAuto: boolean;
@@ -250,6 +263,15 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
           const signalClass = classifySignalClass(expr);
           const volatilityBucket = cluster ? resolveVolatilityBucket(cluster) : 'medium';
           const liquidityBucket = cluster ? resolveLiquidityBucket(cluster) : 'normal';
+          const contextTrace = formatContextPackTrace({
+            marketRegime: expr.contextPack?.regime.marketRegime ?? regime,
+            volatilityBucket: expr.contextPack?.regime.volatilityBucket ?? volatilityBucket,
+            liquidityBucket: expr.contextPack?.regime.liquidityBucket ?? liquidityBucket,
+            executionStatus: expr.contextPack?.executionQuality.status ?? 'unknown',
+            eventKind: expr.contextPack?.event.kind ?? (expr.newsTrigger?.enabled ? 'news_event' : 'technical'),
+            portfolioPosture: expr.contextPack?.portfolioState.posture ?? 'unknown',
+            missing: expr.contextPack?.missing ?? ['contextPack.provider'],
+          });
           try {
             recordPerpTradeJournal({
               kind: 'perp_trade_journal',
@@ -263,7 +285,7 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
               reduceOnly: false,
               markPrice: null,
               confidence: expr.confidence != null ? String(expr.confidence) : null,
-              reasoning: `Observation-only mode: would execute ${expr.side} ${symbol} (edge=${(expr.expectedEdge * 100).toFixed(2)}%)`,
+              reasoning: `Observation-only mode: would execute ${expr.side} ${symbol} (edge=${(expr.expectedEdge * 100).toFixed(2)}%) ${contextTrace}`,
               signalClass,
               marketRegime: regime,
               volatilityBucket,
@@ -290,8 +312,18 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
         }
       }
       const lines = top.map(
-        (expr) =>
-          `- ${expr.symbol} ${expr.side} probe=${expr.probeSizeUsd.toFixed(2)} leverage=${expr.leverage} (${expr.expectedMove})`
+        (expr) => {
+          const contextTrace = formatContextPackTrace({
+            marketRegime: expr.contextPack?.regime.marketRegime ?? expr.marketRegime ?? 'choppy',
+            volatilityBucket: expr.contextPack?.regime.volatilityBucket ?? expr.volatilityBucket ?? 'medium',
+            liquidityBucket: expr.contextPack?.regime.liquidityBucket ?? expr.liquidityBucket ?? 'normal',
+            executionStatus: expr.contextPack?.executionQuality.status ?? 'unknown',
+            eventKind: expr.contextPack?.event.kind ?? (expr.newsTrigger?.enabled ? 'news_event' : 'technical'),
+            portfolioPosture: expr.contextPack?.portfolioState.posture ?? 'unknown',
+            missing: expr.contextPack?.missing ?? ['contextPack.provider'],
+          });
+          return `- ${expr.symbol} ${expr.side} probe=${expr.probeSizeUsd.toFixed(2)} leverage=${expr.leverage} (${expr.expectedMove}) ${contextTrace}`;
+        }
       );
       const header = observationActive
         ? `Discovery scan completed in observation-only mode (${policyState.reason ?? 'adaptive policy active'}).`
@@ -439,7 +471,15 @@ export class AutonomousManager extends EventEmitter<AutonomousEvents> {
         leverage: targetLeverage,
         reasoning: `${expr.expectedMove} | edge=${(expr.expectedEdge * 100).toFixed(2)}% confidence=${(
           expr.confidence * 100
-        ).toFixed(1)}% regime=${regime} signal=${signalClass} kelly=${(kellyFraction * 100).toFixed(1)}%`,
+        ).toFixed(1)}% regime=${regime} signal=${signalClass} kelly=${(kellyFraction * 100).toFixed(1)}% ${formatContextPackTrace({
+          marketRegime: expr.contextPack?.regime.marketRegime ?? regime,
+          volatilityBucket: expr.contextPack?.regime.volatilityBucket ?? volatilityBucket,
+          liquidityBucket: expr.contextPack?.regime.liquidityBucket ?? liquidityBucket,
+          executionStatus: expr.contextPack?.executionQuality.status ?? 'unknown',
+          eventKind: expr.contextPack?.event.kind ?? (expr.newsTrigger?.enabled ? 'news_event' : 'technical'),
+          portfolioPosture: expr.contextPack?.portfolioState.posture ?? 'unknown',
+          missing: expr.contextPack?.missing ?? ['contextPack.provider'],
+        })}`,
       };
 
       const tradeResult = await this.executor.execute(market, decision);
